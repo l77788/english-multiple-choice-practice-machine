@@ -17,6 +17,8 @@ const selectorModels = ref<any[]>([])
 const selectedModelKey = ref('')
 const bulkAnswers = ref<Record<string, string>>({})
 const busy = ref(false)
+const uploadStage = ref('')
+const uploadElapsedSeconds = ref(0)
 const error = ref('')
 const notice = ref('')
 const aiInstructions = ref('')
@@ -40,25 +42,47 @@ onMounted(() => Promise.all([loadJobs(), loadEsqJobs()]).catch(e => error.value 
 
 async function upload() {
   if (!selectedFile.value) return
-  busy.value = true; error.value = ''
+  busy.value = true; error.value = ''; notice.value = ''
+  uploadStage.value = '正在上传并解析 Word 与答案附件'
+  uploadElapsedSeconds.value = 0
+  const uploadTimer = window.setInterval(() => { uploadElapsedSeconds.value += 1 }, 1000)
   const form = new FormData(); form.append('file', selectedFile.value)
   if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
   form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
   form.append('model_assist_correct_structure', modelAssistRewrite.value ? 'true' : 'false')
+  form.append('defer_model_assist', useModelAssist.value ? 'true' : 'false')
   try {
     current.value = await api('/imports', { method: 'POST', body: form })
-    const assist = current.value.model_assist
+    let assist = current.value.model_assist
+    if (useModelAssist.value) {
+      uploadStage.value = '本地草稿已建立，正在调用模型辅助校对'
+      const result: any = await post(`/imports/${current.value.id}/model-assist`, {
+        profile_id: null,
+        model: '',
+        correct_structure: modelAssistRewrite.value,
+      })
+      current.value.draft = result.draft
+      current.value.warnings = result.warnings
+      current.value.model_assist = result.model_assist
+      assist = result.model_assist
+    }
     if (assist?.status === 'failed') {
       assistError.value = assist.error || '未知错误'
       assistDialogOpen.value = true
       showModelSelector.value = false
     } else if (assist?.status === 'applied') {
-      notice.value = `模型辅助解析完成：应用 ${assist.applied_answers} 道答案，发现 ${assist.issue_count} 个结构问题，请核对后发布`
+      notice.value = `模型辅助解析完成：核对 ${assist.applied_answers} 道答案，发现 ${assist.issue_count} 个结构问题，请核对后发布`
+    } else {
+      notice.value = '本地解析完成；本次未请求模型辅助校对'
     }
     bulkAnswers.value = {}
     await loadJobs()
   } catch (e) { error.value = String(e) }
-  finally { busy.value = false }
+  finally {
+    window.clearInterval(uploadTimer)
+    uploadStage.value = ''
+    busy.value = false
+  }
 }
 
 async function openModelSelector() {
@@ -251,6 +275,7 @@ async function exportEsq(includeLabels = false) {
           <p class="lead import-file-hint">支持 DOC、DOCX 和文本型 PDF。扫描版或水印干扰严重的 PDF 会回退到人工录入。</p>
           <p v-if="useModelAssist" class="lead import-file-hint">本地解析完成后会自动调用默认模型核对答案，可能需要 30 秒以上。</p>
           <button class="button" style="width:100%" :disabled="!selectedFile || busy" @click="upload"><FileUp :size="16" />{{ busy ? '正在分析…' : '上传并解析' }}</button>
+          <p v-if="busy && uploadStage" class="lead import-file-hint import-progress">{{ uploadStage }} · {{ uploadElapsedSeconds }} 秒</p>
         </div>
         <div class="card">
           <label class="field"><span>导入 ESQ 共享题库</span><input type="file" accept=".esq,.zip" @change="selectedEsqFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
@@ -308,6 +333,15 @@ async function exportEsq(includeLabels = false) {
           <div class="answer-status" :class="current.draft.answer_status?.status || 'missing'">
             <FileKey2 :size="18" />
             <div><strong>{{ answerProgress.completed }}/{{ answerProgress.total }} 道答案已填写</strong><span>{{ current.draft.answer_status?.message || '请在下方校对并补全标准答案' }}</span></div>
+          </div>
+          <div v-if="current.draft.import_diagnostics" class="import-diagnostics">
+            <span>解析器 {{ current.draft.import_diagnostics.pipeline_revision }}</span>
+            <span>答案附件：{{ current.draft.import_diagnostics.answer_file_received ? '已接收' : '未提供' }}</span>
+            <span>本地答案 {{ current.draft.import_diagnostics.local_answer_count || 0 }} 道</span>
+            <span v-if="current.draft.import_diagnostics.model_call_status === 'completed'">模型已调用 · {{ current.draft.import_diagnostics.model_name || '默认模型' }} · {{ Math.round((current.draft.import_diagnostics.model_call_elapsed_ms || 0) / 1000) }} 秒</span>
+            <span v-else-if="current.draft.import_diagnostics.model_call_status === 'failed'">模型调用失败</span>
+            <span v-else-if="current.draft.import_diagnostics.model_call_status === 'deferred'">等待模型校对</span>
+            <span v-else>本次未调用模型</span>
           </div>
           <div v-if="current.draft.model_assist?.status === 'applied'" class="import-assist-banner">
             <Sparkles :size="17" />

@@ -1012,18 +1012,23 @@ def parse_exam(
             answer_status = attachment_status
             answer_source = answer_name or companion.name
             attachment_used = True
-        elif not answer_key:
+        # A Word export may contain a sparse answer column (for example only
+        # every fifth answer).  Do not treat that as proof that a companion
+        # answer file is unnecessary; merge a reliable same-folder PDF for
+        # any still-missing questions when one is available.
+        if not companion:
             legacy_companion = find_companion_answer_pdf(path, year)
             if legacy_companion:
                 attachment_answers, attachment_status = extract_answer_attachment(
                     legacy_companion
                 )
-                answer_key.update(attachment_answers)
-                for number in attachment_answers:
-                    answer_sources[str(number)] = legacy_companion.name
-                answer_status = attachment_status
-                answer_source = legacy_companion.name
-                attachment_used = True
+                if attachment_answers:
+                    for number, answer in attachment_answers.items():
+                        answer_key[number] = answer
+                        answer_sources[str(number)] = legacy_companion.name
+                    answer_status = attachment_status
+                    answer_source = legacy_companion.name
+                    attachment_used = True
         units = [_parse_cloze(blocks, answer_key)]
         units.extend(_parse_reading(blocks, answer_key))
         if _has_objective_part_b(blocks):

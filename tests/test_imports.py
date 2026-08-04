@@ -337,6 +337,88 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertEqual(body["model_assist"]["fell_back_to_local"], True)
         self.assertEqual(body["draft"]["answers"], {})
 
+    def test_deferred_model_assist_keeps_answer_text_and_reports_stages(self) -> None:
+        from backend.app.database import connect
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with (
+            patch.object(imports_router, "parse_exam", return_value=draft),
+            patch.object(
+                imports_router,
+                "extract_attachment_text",
+                return_value="参考答案 21-25 BACDC",
+            ),
+            patch.object(imports_router, "run_model_assist") as mocked,
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files={
+                    "file": (
+                        "paper.docx",
+                        io.BytesIO(b"paper"),
+                        "application/octet-stream",
+                    ),
+                    "answer_file": (
+                        "answers.docx",
+                        io.BytesIO(b"answers"),
+                        "application/octet-stream",
+                    ),
+                },
+                data={
+                    "use_model_assist": "true",
+                    "model_assist_correct_structure": "true",
+                    "defer_model_assist": "true",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        mocked.assert_not_called()
+        body = response.json()
+        diagnostics = body["draft"]["import_diagnostics"]
+        self.assertEqual(diagnostics["model_call_status"], "deferred")
+        self.assertTrue(diagnostics["answer_file_received"])
+        self.assertEqual(diagnostics["answer_text_chars"], len("参考答案 21-25 BACDC"))
+
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT parse_context FROM import_jobs WHERE id = ?",
+                (body["id"],),
+            ).fetchone()
+        context = json.loads(row["parse_context"])
+        self.assertEqual(context["answer_text"], "参考答案 21-25 BACDC")
+
+        with (
+            patch.object(imports_router, "document_text", return_value="document"),
+            patch.object(
+                imports_router,
+                "_model_identity",
+                return_value=("Default API", "default-model"),
+            ),
+            patch.object(
+                imports_router,
+                "run_model_assist",
+                return_value=(
+                    {"answer_map": {"21": "B"}, "number_map": {}, "issues": []},
+                    "raw",
+                ),
+            ),
+        ):
+            assisted = self.client.post(
+                f"/api/imports/{body['id']}/model-assist",
+                json={"profile_id": None, "model": "", "correct_structure": True},
+            )
+        self.assertEqual(assisted.status_code, 200)
+        assisted_body = assisted.json()
+        self.assertEqual(assisted_body["model_assist"]["status"], "applied")
+        self.assertEqual(
+            assisted_body["draft"]["import_diagnostics"]["model_call_status"],
+            "completed",
+        )
+        self.assertEqual(
+            assisted_body["draft"]["import_diagnostics"]["model_name"],
+            "default-model",
+        )
+
     def test_model_assist_retry_with_other_model(self) -> None:
         from backend.app.database import connect
         from backend.app.routers import imports as imports_router

@@ -345,6 +345,8 @@ h2, h3 { margin: 0; }
 .import-assist-toggle input { margin-top:2px; accent-color:var(--primary); }
 .import-assist-banner { display:flex; gap:10px; align-items:flex-start; margin:12px 0 0; padding:11px 13px; border-radius:12px; background:var(--primary-soft); color:var(--ink); font-size:12px; line-height:1.7; }
 .import-assist-banner svg { flex:none; margin-top:2px; color:var(--primary); }
+.import-diagnostics { display:flex; flex-wrap:wrap; gap:7px; margin-top:10px; }
+.import-diagnostics span { padding:4px 8px; border:1px solid var(--line); border-radius:999px; background:var(--surface-solid); color:var(--muted); font-size:11px; }
 .import-assist-dialog { display:flex; flex-direction:column; justify-content:center; text-align:left; }
 .import-assist-dialog .field select { width:100%; }
 .field-hint { margin:8px 0 0; font-size:11px; color:var(--muted); line-height:1.7; }
@@ -538,6 +540,7 @@ h2, h3 { margin: 0; }
 .api-model-row>button:disabled { cursor:not-allowed; }
 .api-model-empty { padding:24px 15px; border:1px dashed var(--line-strong); border-radius:13px; text-align:center; color:var(--muted); font-size:12px; }
 .import-file-hint { margin:-5px 0 15px; font-size:11px; line-height:1.55; }
+.import-progress { margin:10px 0 0; color:var(--primary); text-align:center; font-weight:650; }
 .answer-status { margin-top:18px; padding:13px 14px; display:flex; align-items:flex-start; gap:11px; border:1px solid var(--line); border-radius:13px; background:var(--primary-faint); color:var(--primary); }
 .answer-status.manual_required,.answer-status.missing { color:var(--danger); border-color:color-mix(in srgb,var(--danger) 25%,var(--line)); background:var(--danger-soft); }
 .answer-status>div { min-width:0; display:grid; gap:3px; }

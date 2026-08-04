@@ -101,6 +101,10 @@ def run_model_assist(
 3. 结构问题：列出材料与草稿明显不一致的问题（选项归属错误、题干断行、答案数量与题目数不符、
    完形或 Part B 空位缺失等），每条一句话放入 issues。
 
+注意：draft_summary 中列出的 expected_numbers 是本次实际导入的客观题题号。
+如果材料中的 Part B 是“translate the underlined segments into Chinese”等翻译题，且草稿没有导入 41-45，
+这是预期行为，不要把“缺少 Part B 41-45”列为 issues，也不要要求把翻译题强行转换成客观题。
+
 """
     if correct_structure:
         prompt += """
@@ -304,6 +308,30 @@ def apply_model_assist(
         "model_name": model_name,
         "applied_at": datetime.now().isoformat(timespec="seconds"),
     }
+    # When a complete answer map is returned and there are no unresolved
+    # structural issues, the model has performed the requested one-click
+    # proofreading.  Mark the answer set confirmed so a complete Word+answer
+    # import is publishable without a redundant manual save step.  Incomplete
+    # or disputed results retain the existing manual-review gate.
+    expected_answer_numbers = {
+        str(number) for number in objective_question_numbers(draft)
+    }
+    answered_numbers = {
+        str(number)
+        for number, value in answers.items()
+        if str(value or "").strip()
+    }
+    fully_verified = bool(expected_answer_numbers) and expected_answer_numbers <= answered_numbers and not issue_texts
+    if fully_verified:
+        draft["answers_confirmed"] = True
+        draft["answer_source"] = "模型辅助"
+        draft["answer_status"] = {
+            "status": "confirmed",
+            "message": "模型已完成答案与题目结构校对",
+        }
+        draft["model_assist"]["answers_confirmed_by_model"] = True
+    else:
+        draft["model_assist"]["answers_confirmed_by_model"] = False
     apply_answers_to_draft(draft)
     draft["warnings"] = validate_draft(draft)
     existing = set(draft["warnings"])

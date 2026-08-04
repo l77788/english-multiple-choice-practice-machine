@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import time
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
@@ -25,9 +28,24 @@ from ..services.import_assist import (
     extract_attachment_text,
     run_model_assist,
 )
+from ..services.ai_client import get_ai_profile
 
 
 router = APIRouter(prefix="/imports", tags=["imports"])
+IMPORT_PIPELINE_REVISION = "word-import-2026.08.04.3"
+
+
+def _model_identity(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int | None = None,
+    model: str = "",
+) -> tuple[str, str]:
+    profile = get_ai_profile(connection, profile_id)
+    selected_model = (
+        model.strip() or str(profile.get("default_model", "")).strip()
+    )
+    return str(profile.get("name", "")).strip(), selected_model
 
 
 @router.get("")
@@ -54,8 +72,10 @@ async def upload_import(
     answer_file: UploadFile | None = File(default=None),
     use_model_assist: bool = Form(False),
     model_assist_correct_structure: bool = Form(False),
+    defer_model_assist: bool = Form(False),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    import_started = time.perf_counter()
     if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
         raise HTTPException(400, "请选择 Word 文件")
     if answer_file and (
@@ -74,24 +94,61 @@ async def upload_import(
         stored_answer_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{answer_suffix}"
         with stored_answer_path.open("wb") as target:
             shutil.copyfileobj(answer_file.file, target)
-    parse_context: dict[str, str] = {}
+    parse_context: dict[str, Any] = {}
+    diagnostics: dict[str, Any] = {
+        "pipeline_revision": IMPORT_PIPELINE_REVISION,
+        "use_model_assist_requested": use_model_assist,
+        "structure_fix_requested": model_assist_correct_structure,
+        "answer_file_received": bool(answer_file and answer_file.filename),
+        "answer_file_name": answer_file.filename if answer_file else "",
+        "model_call_status": (
+            "deferred"
+            if use_model_assist and defer_model_assist
+            else "pending"
+            if use_model_assist
+            else "not_requested"
+        ),
+    }
     try:
+        local_started = time.perf_counter()
         draft = parse_exam(
             stored_path,
             answer_path=stored_answer_path,
             source_name=file.filename,
             answer_name=answer_file.filename if answer_file else None,
         )
-        if use_model_assist:
-            answer_text = ""
-            if stored_answer_path:
-                answer_text = extract_attachment_text(stored_answer_path)
-            elif not draft.get("answers"):
-                companion = find_companion_answer_pdf(stored_path, draft.get("year"))
-                if companion:
-                    answer_text = extract_attachment_text(companion)
-            parse_context["answer_text"] = answer_text[:20000]
+        diagnostics.update(
+            {
+                "local_parse_elapsed_ms": round(
+                    (time.perf_counter() - local_started) * 1000
+                ),
+                "local_answer_count": sum(
+                    1 for value in draft.get("answers", {}).values() if value
+                ),
+                "local_unit_count": len(draft.get("units", [])),
+                "local_warning_count": len(draft.get("warnings", [])),
+            }
+        )
+        answer_text = ""
+        if stored_answer_path:
+            answer_text = extract_attachment_text(stored_answer_path)
+        elif not draft.get("answers"):
+            companion = find_companion_answer_pdf(stored_path, draft.get("year"))
+            if companion:
+                answer_text = extract_attachment_text(companion)
+        parse_context["answer_text"] = answer_text[:20000]
+        diagnostics["answer_text_chars"] = len(parse_context["answer_text"])
+        draft["import_diagnostics"] = diagnostics
+        if use_model_assist and not defer_model_assist:
+            model_started = time.perf_counter()
+            diagnostics["model_call_status"] = "running"
+            diagnostics["model_call_started_at"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
             try:
+                profile_name, model_name = _model_identity(connection)
+                diagnostics["model_profile_name"] = profile_name
+                diagnostics["model_name"] = model_name
                 result, _ = run_model_assist(
                     connection,
                     draft,
@@ -102,9 +159,14 @@ async def upload_import(
                 draft = apply_model_assist(
                     draft,
                     result,
+                    model_name=model_name,
                     correct_structure=model_assist_correct_structure,
                 )
                 draft["model_assist"]["phase"] = "upload"
+                diagnostics["model_call_status"] = "completed"
+                diagnostics["model_call_elapsed_ms"] = round(
+                    (time.perf_counter() - model_started) * 1000
+                )
                 if not draft.get("answers_confirmed"):
                     draft["answer_status"] = {
                         "status": "parsed",
@@ -114,12 +176,22 @@ async def upload_import(
                         ),
                     }
             except Exception as error:
+                diagnostics["model_call_status"] = "failed"
+                diagnostics["model_call_elapsed_ms"] = round(
+                    (time.perf_counter() - model_started) * 1000
+                )
+                diagnostics["model_error"] = str(error)[:400]
                 draft["model_assist"] = {
                     "status": "failed",
                     "phase": "upload",
                     "error": str(error)[:400],
                     "fell_back_to_local": True,
                 }
+        diagnostics["total_elapsed_ms"] = round(
+            (time.perf_counter() - import_started) * 1000
+        )
+        draft["import_diagnostics"] = diagnostics
+        parse_context["import_diagnostics"] = diagnostics
     except Exception as error:
         stored_path.unlink(missing_ok=True)
         if stored_answer_path:
@@ -175,7 +247,27 @@ def model_assist_retry(
     except json.JSONDecodeError:
         parse_context = {}
     answer_text = str(parse_context.get("answer_text", ""))
+    diagnostics = draft.setdefault(
+        "import_diagnostics",
+        {
+            "pipeline_revision": IMPORT_PIPELINE_REVISION,
+            "use_model_assist_requested": True,
+            "answer_text_chars": len(answer_text),
+        },
+    )
+    model_started = time.perf_counter()
+    diagnostics["model_call_status"] = "running"
+    diagnostics["model_call_started_at"] = datetime.now().isoformat(
+        timespec="seconds"
+    )
     try:
+        profile_name, model_name = _model_identity(
+            connection,
+            profile_id=request.profile_id,
+            model=request.model,
+        )
+        diagnostics["model_profile_name"] = profile_name
+        diagnostics["model_name"] = model_name
         result, _ = run_model_assist(
             connection,
             draft,
@@ -188,10 +280,15 @@ def model_assist_retry(
         draft = apply_model_assist(
             draft,
             result,
-            model_name=request.model.strip(),
+            model_name=model_name,
             correct_structure=request.correct_structure,
         )
         draft["model_assist"]["phase"] = "retry"
+        diagnostics["model_call_status"] = "completed"
+        diagnostics["model_call_elapsed_ms"] = round(
+            (time.perf_counter() - model_started) * 1000
+        )
+        diagnostics["structure_fix_requested"] = request.correct_structure
         if not draft.get("answers_confirmed"):
             draft["answer_status"] = {
                 "status": "parsed",
@@ -201,6 +298,21 @@ def model_assist_retry(
                 ),
             }
     except Exception as error:
+        diagnostics["model_call_status"] = "failed"
+        diagnostics["model_call_elapsed_ms"] = round(
+            (time.perf_counter() - model_started) * 1000
+        )
+        diagnostics["model_error"] = str(error)[:400]
+        draft["import_diagnostics"] = diagnostics
+        connection.execute(
+            """
+            UPDATE import_jobs
+            SET draft_data = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (json.dumps(draft, ensure_ascii=False), job_id),
+        )
+        connection.commit()
         return {
             "draft": draft,
             "warnings": draft.get("warnings", []),
