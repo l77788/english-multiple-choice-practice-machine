@@ -290,12 +290,24 @@ CREATE TABLE IF NOT EXISTS question_label_run_items (
 
 CREATE TABLE IF NOT EXISTS wrong_analysis_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_key TEXT NOT NULL DEFAULT '',
+    unit_ids TEXT NOT NULL DEFAULT '[]',
+    input_snapshot TEXT NOT NULL DEFAULT '{}',
     scope_title TEXT NOT NULL DEFAULT '',
     question_count INTEGER NOT NULL DEFAULT 0,
     aggregate_data TEXT NOT NULL DEFAULT '{}',
     report TEXT NOT NULL,
     model_name TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS wrong_analysis_states (
+    unit_id INTEGER PRIMARY KEY,
+    report_id INTEGER NOT NULL,
+    analyzed_session_id INTEGER NOT NULL DEFAULT 0,
+    analyzed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (unit_id) REFERENCES units(id) ON DELETE CASCADE,
+    FOREIGN KEY (report_id) REFERENCES wrong_analysis_reports(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS question_bank_packages (
@@ -421,6 +433,10 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "questions", "external_key", "TEXT")
     _ensure_column(connection, "questions", "content_hash", "TEXT")
     _ensure_column(connection, "options", "metadata", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "wrong_analysis_reports", "scope_key", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "wrong_analysis_reports", "unit_ids", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "wrong_analysis_reports", "input_snapshot", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "wrong_analysis_states", "analyzed_session_id", "INTEGER NOT NULL DEFAULT 0")
     connection.execute(
         """
         UPDATE vocabulary_entries

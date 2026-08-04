@@ -625,6 +625,50 @@ def chat(
     }
 
 
+def _scope_key(unit_ids: list[int]) -> str:
+    return ",".join(str(value) for value in sorted(set(unit_ids)))
+
+
+def _latest_wrong_snapshot(
+    connection: sqlite3.Connection,
+    unit_ids: list[int],
+    question_ids: list[int],
+) -> dict[str, object]:
+    """Capture each unit's most recent submitted wrong answers for comparison."""
+    placeholders = ",".join("?" for _ in question_ids)
+    snapshot: dict[str, object] = {}
+    for unit_id in unit_ids:
+        rows = connection.execute(
+            f"""
+            SELECT q.id, q.number,
+                   (SELECT pa.user_answer
+                    FROM practice_answers AS pa
+                    JOIN practice_sessions AS ps ON ps.id = pa.session_id
+                    WHERE pa.question_id = q.id
+                      AND pa.is_correct IS NOT NULL
+                      AND TRIM(pa.user_answer) <> ''
+                    ORDER BY COALESCE(ps.submitted_at, pa.answered_at) DESC,
+                             pa.id DESC
+                    LIMIT 1) AS user_answer
+            FROM questions AS q
+            WHERE q.unit_id = ? AND q.id IN ({placeholders})
+            ORDER BY q.sequence
+            """,
+            (unit_id, *question_ids),
+        ).fetchall()
+        errors = [
+            {
+                "question_id": int(row["id"]),
+                "number": int(row["number"]),
+                "selected": row["user_answer"],
+            }
+            for row in rows
+            if row["user_answer"]
+        ]
+        snapshot[str(unit_id)] = {"errors": errors}
+    return snapshot
+
+
 @router.post("/analyze-wrong")
 def analyze_wrong(
     request: AiAnalyzeRequest,
@@ -645,18 +689,125 @@ def analyze_wrong(
         ]
     if not question_ids:
         raise HTTPException(400, "没有可分析的错题")
+    question_ids = list(dict.fromkeys(int(value) for value in question_ids))
+    placeholders = ",".join("?" for _ in question_ids)
+    unit_rows = connection.execute(
+        f"SELECT DISTINCT unit_id FROM questions WHERE id IN ({placeholders})",
+        question_ids,
+    ).fetchall()
+    unit_ids = [int(row["unit_id"]) for row in unit_rows]
+    if not unit_ids:
+        raise HTTPException(400, "没有可分析的篇目")
+    scope_key = _scope_key(unit_ids)
+
+    report = connection.execute(
+        """
+        SELECT * FROM wrong_analysis_reports
+        WHERE scope_key = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (scope_key,),
+    ).fetchone()
+    states = connection.execute(
+        f"""
+        SELECT unit_id, report_id, analyzed_session_id
+        FROM wrong_analysis_states
+        WHERE unit_id IN ({",".join("?" for _ in unit_ids)})
+        """,
+        unit_ids,
+    ).fetchall()
+    states_by_unit = {int(row["unit_id"]): row for row in states}
+
+    all_retried = True
+    locked_report_ids: list[int] = []
+    for unit_id in unit_ids:
+        state = states_by_unit.get(unit_id)
+        if state is None:
+            continue
+        completed = connection.execute(
+            """
+            SELECT 1 FROM practice_unit_submissions
+            WHERE unit_id = ? AND session_id > ?
+            LIMIT 1
+            """,
+            (unit_id, state["analyzed_session_id"]),
+        ).fetchone()
+        if not completed:
+            all_retried = False
+            locked_report_ids.append(int(state["report_id"]))
+
+    cached_report = report if report is not None and not all_retried else None
+    if cached_report is None and locked_report_ids:
+        cached_report = connection.execute(
+            """
+            SELECT * FROM wrong_analysis_reports
+            WHERE id = ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (locked_report_ids[0],),
+        ).fetchone()
+    if cached_report is not None:
+        try:
+            aggregate = json.loads(cached_report["aggregate_data"] or "{}")
+        except json.JSONDecodeError:
+            aggregate = {}
+        return {
+            "analysis": cached_report["report"],
+            "aggregate": aggregate,
+            "report_id": int(cached_report["id"]),
+            "scope_title": cached_report["scope_title"],
+            "cached": True,
+            "locked": True,
+            "reanalyze_after_retry": True,
+        }
+
+    previous_snapshot: dict[str, object] = {}
+    if report is not None:
+        try:
+            previous_snapshot = json.loads(report["input_snapshot"] or "{}")
+        except json.JSONDecodeError:
+            previous_snapshot = {}
+    if not previous_snapshot:
+        for unit_id in unit_ids:
+            state = states_by_unit.get(unit_id)
+            if state is None:
+                continue
+            previous = connection.execute(
+                "SELECT input_snapshot FROM wrong_analysis_reports WHERE id = ?",
+                (state["report_id"],),
+            ).fetchone()
+            if previous is None:
+                continue
+            try:
+                parsed = json.loads(previous["input_snapshot"] or "{}")
+            except json.JSONDecodeError:
+                parsed = {}
+            if isinstance(parsed, dict) and str(unit_id) in parsed:
+                previous_snapshot.setdefault(str(unit_id), parsed[str(unit_id)])
+
     try:
-        diagnoses, _ = diagnose_wrong_answers(connection, question_ids)
+        diagnoses, _ = diagnose_wrong_answers(
+            connection,
+            question_ids,
+            previous_snapshot=previous_snapshot or None,
+        )
         aggregate = aggregate_diagnoses(diagnoses)
         content = write_anonymous_report(connection, aggregate)
         profile = get_ai_profile(connection)
+        input_snapshot = _latest_wrong_snapshot(
+            connection, unit_ids, question_ids
+        )
         cursor = connection.execute(
             """
             INSERT INTO wrong_analysis_reports
-                (scope_title, question_count, aggregate_data, report, model_name)
-            VALUES (?, ?, ?, ?, ?)
+                (scope_key, unit_ids, input_snapshot, scope_title,
+                 question_count, aggregate_data, report, model_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                scope_key,
+                json.dumps(unit_ids),
+                json.dumps(input_snapshot, ensure_ascii=False),
                 request.scope_title or request.focus[:80],
                 aggregate["question_count"],
                 json.dumps(aggregate, ensure_ascii=False),
@@ -664,14 +815,73 @@ def analyze_wrong(
                 profile["default_model"],
             ),
         )
+        report_id = int(cursor.lastrowid)
+        max_session_id = connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM practice_sessions"
+        ).fetchone()["max_id"]
+        for unit_id in unit_ids:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO wrong_analysis_states
+                    (unit_id, report_id, analyzed_session_id, analyzed_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (unit_id, report_id, max_session_id),
+            )
         connection.commit()
     except (ValueError, LookupError, httpx.HTTPError, json.JSONDecodeError) as error:
         raise HTTPException(400, f"分析失败：{error}") from error
     return {
         "analysis": content,
         "aggregate": aggregate,
-        "report_id": int(cursor.lastrowid),
+        "report_id": report_id,
+        "scope_title": request.scope_title,
+        "cached": False,
+        "locked": True,
+        "reanalyze_after_retry": True,
     }
+
+
+@router.get("/wrong-analysis-status")
+def wrong_analysis_status(
+    connection: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    rows = connection.execute(
+        """
+        SELECT s.unit_id, s.report_id, s.analyzed_session_id,
+               r.scope_key, r.scope_title, r.report, r.aggregate_data
+        FROM wrong_analysis_states s
+        JOIN wrong_analysis_reports r ON r.id = s.report_id
+        ORDER BY s.unit_id
+        """
+    ).fetchall()
+    units = []
+    for row in rows:
+        completed = connection.execute(
+            """
+            SELECT 1 FROM practice_unit_submissions
+            WHERE unit_id = ? AND session_id > ?
+            LIMIT 1
+            """,
+            (row["unit_id"], row["analyzed_session_id"]),
+        ).fetchone()
+        try:
+            aggregate = json.loads(row["aggregate_data"] or "{}")
+        except json.JSONDecodeError:
+            aggregate = {}
+        units.append(
+            {
+                "unit_id": int(row["unit_id"]),
+                "report_id": int(row["report_id"]),
+                "scope_title": row["scope_title"],
+                "scope_key": row["scope_key"],
+                "locked": not bool(completed),
+                "can_reanalyze": bool(completed),
+                "report": row["report"],
+                "aggregate": aggregate,
+            }
+        )
+    return {"units": units}
 
 
 @router.get("/question-labels/status")

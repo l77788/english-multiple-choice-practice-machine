@@ -100,6 +100,7 @@ def _question_history(
 def build_diagnostic_payload(
     connection: sqlite3.Connection,
     question_ids: list[int],
+    previous_snapshot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if not question_ids:
         return []
@@ -132,6 +133,9 @@ def build_diagnostic_payload(
                 "unit_title": row["title"],
                 "unit_type": row["unit_type"],
                 "passage": row["passage"][:7000],
+                "previous_errors": (previous_snapshot or {}).get(
+                    str(row["unit_id"]), {}
+                ).get("errors", []),
                 "questions": [],
             },
         )
@@ -173,8 +177,11 @@ def build_diagnostic_payload(
 def diagnose_wrong_answers(
     connection: sqlite3.Connection,
     question_ids: list[int],
+    previous_snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
-    payload = build_diagnostic_payload(connection, question_ids)
+    payload = build_diagnostic_payload(
+        connection, question_ids, previous_snapshot=previous_snapshot
+    )
     if not payload:
         raise ValueError("没有可分析的错题记录")
     prompt = """
@@ -182,6 +189,9 @@ def diagnose_wrong_answers(
 但你的输出只用于程序后台，绝不能写逐题解析、翻译原文，也不要复述题目或选项。
 请判断每道题的主要错误原因。越新的作答记录权重越高；旧记录可能只有最终选择。
 证据不足时必须使用 uncertain，不要强行归因。
+如果提供了 previous_errors（上一次分析时的错误选项），你可以对比两次作答，
+判断用户是否仍然选择同一错误选项，或薄弱环节是否发生变化；对比结果只能用于
+归因和复习建议，绝不能复述选项内容或暴露选项文字。
 
 只输出合法 JSON：
 {"diagnoses":[
