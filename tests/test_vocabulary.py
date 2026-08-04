@@ -175,6 +175,137 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(tuple(rows[0]), ("随机地", "随机地"))
         self.assertEqual(tuple(rows[1]), ("用户保留（我的注释）", "声称"))
 
+    def test_batch_translation_stores_discrimination_fields(self) -> None:
+        import json
+
+        from backend.app.services.vocabulary import _serialize_entry
+
+        first = add_vocabulary(
+            self.connection,
+            {"term": "claims", "context_sentence": "The author claims the result."},
+        )
+        second = add_vocabulary(
+            self.connection,
+            {"term": "evidence", "context_sentence": "The evidence supports it."},
+        )
+        self.connection.execute(
+            """
+            UPDATE ai_profiles
+            SET enabled = 1, default_model = 'test-model'
+            WHERE id = (SELECT id FROM ai_profiles ORDER BY id LIMIT 1)
+            """
+        )
+        self.connection.commit()
+        response = {
+            "translations": [
+                {
+                    "entryId": first["entry_id"],
+                    "lemma": "claim",
+                    "phonetic": "",
+                    "partOfSpeech": "v.",
+                    "contextualMeaning": "声称",
+                    "commonMeaning": "声称；主张",
+                    "memoryHint": "",
+                    "synonyms": [
+                        {"word": "assert", "note": "更强调坚定地声明"},
+                        {"word": "maintain", "note": "强调持续坚持"},
+                    ],
+                    "antonyms": [],
+                    "similarForms": [{"word": "clams", "note": "差一个字母"}],
+                },
+                {
+                    "entryId": second["entry_id"],
+                    "lemma": "evidence",
+                    "phonetic": "",
+                    "partOfSpeech": "n.",
+                    "contextualMeaning": "证据",
+                    "commonMeaning": "证据；证明",
+                    "memoryHint": "",
+                    "synonyms": [],
+                    "antonyms": [],
+                    "similarForms": [],
+                },
+            ]
+        }
+        with (
+            patch(
+                "backend.app.services.vocabulary.connect",
+                return_value=self.connection,
+            ),
+            patch(
+                "backend.app.services.vocabulary.chat_completion",
+                return_value=json.dumps(response, ensure_ascii=False),
+            ),
+        ):
+            result = translate_queued_vocabulary()
+        self.assertEqual(result["translated"], 2)
+        first_payload = _serialize_entry(self.connection, first["entry_id"])
+        second_payload = _serialize_entry(self.connection, second["entry_id"])
+        self.assertEqual(
+            [item["word"] for item in first_payload["synonyms"]],
+            ["assert", "maintain"],
+        )
+        self.assertEqual(first_payload["antonyms"], [])
+        self.assertEqual(first_payload["similar_forms"][0]["word"], "clams")
+        self.assertEqual(second_payload["synonyms"], [])
+        self.assertEqual(second_payload["antonyms"], [])
+        self.assertEqual(second_payload["similar_forms"], [])
+
+    def test_local_similar_matches_are_attached_and_prioritized(self) -> None:
+        from backend.app.services.vocabulary import _serialize_entry
+
+        self.connection.executemany(
+            """
+            INSERT INTO vocabulary_entries
+                (term, normalized_term, translation_status,
+                 synonyms, antonyms, similar_forms)
+            VALUES (?, ?, 'ready', '[]', '[]', ?)
+            """,
+            [
+                ("adapt", "adapt", "[]"),
+                ("adopt", "adopt", "[]"),
+                ("adept", "adept", "[]"),
+                ("effect", "effect", json_dump([{"word": "affect", "note": "易混"}])),
+                ("affect", "affect", "[]"),
+            ],
+        )
+        self.connection.commit()
+        adapt_id = self.connection.execute(
+            "SELECT id FROM vocabulary_entries WHERE term = 'adapt'"
+        ).fetchone()["id"]
+        payload = _serialize_entry(self.connection, adapt_id)
+        local_words = [item["word"] for item in payload["local_similar"]]
+        self.assertEqual(local_words, ["adept", "adopt"])
+        self.assertTrue(
+            all(item["source"] == "本地匹配" for item in payload["local_similar"])
+        )
+
+    def test_discrimination_list_allows_empty_and_caps_entries(self) -> None:
+        from backend.app.services.vocabulary import _discrimination_list
+
+        self.assertEqual(_discrimination_list([]), [])
+        self.assertEqual(_discrimination_list("[]"), [])
+        self.assertEqual(_discrimination_list(None), [])
+        self.assertEqual(
+            _discrimination_list(
+                [
+                    {"word": "a", "note": "x"},
+                    {"word": "A", "note": "duplicate"},
+                    {"word": "b", "note": "y"},
+                    {"word": "c", "note": "z"},
+                    "not-a-dict",
+                ]
+            ),
+            [{"word": "a", "note": "x"}, {"word": "b", "note": "y"}, {"word": "c", "note": "z"}],
+        )
+        self.assertEqual(_discrimination_list([{"word": "", "note": "x"}]), [])
+
+
+def json_dump(value: object) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     unittest.main()

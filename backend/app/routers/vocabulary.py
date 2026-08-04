@@ -15,6 +15,7 @@ from ..schemas import (
 from ..services.vocabulary import (
     _serialize_entry,
     add_vocabulary,
+    local_similar_matches,
     queue_vocabulary_translations,
     review_entry,
     translate_queued_vocabulary,
@@ -94,7 +95,11 @@ def list_entries(
         FROM vocabulary_entries
         """
     ).fetchone()
-    return {"items": [dict(row) for row in rows], "counts": dict(counts)}
+    items = [dict(row) for row in rows]
+    local_map = local_similar_matches(connection, [item["id"] for item in items])
+    for item in items:
+        item["local_similar"] = local_map.get(item["id"], [])
+    return {"items": items, "counts": dict(counts)}
 
 
 @router.get("/home")

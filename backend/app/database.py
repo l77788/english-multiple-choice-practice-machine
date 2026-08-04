@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS vocabulary_entries (
     part_of_speech TEXT NOT NULL DEFAULT '',
     contextual_meaning TEXT NOT NULL DEFAULT '',
     common_meaning TEXT NOT NULL DEFAULT '',
+    synonyms TEXT NOT NULL DEFAULT '[]',
+    antonyms TEXT NOT NULL DEFAULT '[]',
+    similar_forms TEXT NOT NULL DEFAULT '[]',
     memory_hint TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
     translation_status TEXT NOT NULL DEFAULT 'pending',
@@ -439,6 +442,9 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "wrong_analysis_reports", "input_snapshot", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "wrong_analysis_states", "analyzed_session_id", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "import_jobs", "parse_context", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(connection, "vocabulary_entries", "synonyms", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "vocabulary_entries", "antonyms", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "vocabulary_entries", "similar_forms", "TEXT NOT NULL DEFAULT '[]'")
     connection.execute(
         """
         UPDATE vocabulary_entries

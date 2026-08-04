@@ -53,6 +53,120 @@ def vocabulary_key(value: str) -> str:
     return normalized
 
 
+def _discrimination_list(value: Any, limit: int = 3) -> list[dict[str, str]]:
+    """Normalize model-provided synonym/antonym/similar-form entries."""
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    else:
+        parsed = value
+    if not isinstance(parsed, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        word = str(item.get("word", "")).strip()
+        note = str(item.get("note", "") or item.get("reason", "")).strip()
+        if not word or len(word) > 60:
+            continue
+        key = word.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"word": word[:60], "note": note[:80]})
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _match_key(term: str) -> str:
+    return re.sub(r"[^a-z]", "", term.lower())
+
+
+def _edit_distance(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    previous = list(range(len(right) + 1))
+    for index, left_char in enumerate(left, 1):
+        current = [index]
+        for right_index, right_char in enumerate(right, 1):
+            current.append(
+                min(
+                    previous[right_index] + 1,
+                    current[right_index - 1] + 1,
+                    previous[right_index - 1] + (left_char != right_char),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def local_similar_matches(
+    connection: sqlite3.Connection,
+    entry_ids: list[int],
+    *,
+    max_distance: int = 2,
+    limit: int = 4,
+) -> dict[int, list[dict[str, str]]]:
+    """Find words already in the wordbook whose spelling is close to each entry."""
+    if not entry_ids:
+        return {}
+    pool = connection.execute("SELECT id, term FROM vocabulary_entries").fetchall()
+    pool_by_id = {row["id"]: row for row in pool}
+    buckets: dict[int, list[tuple[int, str, str]]] = {}
+    for row in pool:
+        key = _match_key(row["term"])
+        buckets.setdefault(len(key), []).append((row["id"], key, row["term"]))
+    result: dict[int, list[dict[str, str]]] = {}
+    for entry_id in {int(value) for value in entry_ids}:
+        term_row = pool_by_id.get(entry_id)
+        if term_row is None:
+            continue
+        own_key = _match_key(term_row["term"])
+        candidates: list[tuple[int, str]] = []
+        for length in range(max(1, len(own_key) - 2), len(own_key) + 3):
+            for pool_id, pool_key, pool_term in buckets.get(length, []):
+                if pool_id == entry_id:
+                    continue
+                if abs(len(pool_key) - len(own_key)) > 2:
+                    continue
+                distance = _edit_distance(own_key, pool_key)
+                if distance <= max_distance:
+                    candidates.append((distance, pool_term))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        result[entry_id] = [
+            {"word": term, "note": "本地匹配", "source": "本地匹配"}
+            for _, term in candidates[:limit]
+        ]
+    return result
+
+
+def _enrich_discrimination(
+    connection: sqlite3.Connection,
+    payload: dict[str, Any],
+) -> None:
+    """Parse stored JSON columns and attach local wordbook matches."""
+    model_similar = _discrimination_list(payload.get("similar_forms"))
+    payload["synonyms"] = _discrimination_list(payload.get("synonyms"))
+    payload["antonyms"] = _discrimination_list(payload.get("antonyms"))
+    payload["similar_forms"] = model_similar
+    local = local_similar_matches(connection, [int(payload["id"])]).get(
+        int(payload["id"]), []
+    )
+    model_words = {item["word"].lower() for item in model_similar}
+    payload["local_similar"] = [
+        item for item in local if item["word"].lower() not in model_words
+    ]
+
+
 def validate_term(value: str) -> str:
     normalized = re.sub(r"\s+", " ", value.strip())
     if not TERM_RE.fullmatch(normalized):
@@ -150,6 +264,7 @@ def _serialize_entry(connection: sqlite3.Connection, entry_id: int) -> dict[str,
             (entry_id,),
         ).fetchall()
     ]
+    _enrich_discrimination(connection, payload)
     return payload
 
 
@@ -392,12 +507,17 @@ def _translate_vocabulary_batch(
       "partOfSpeech": "简短词性",
       "contextualMeaning": "该原句中的准确中文释义",
       "commonMeaning": "一到三个常见中文释义",
-      "memoryHint": "一句简短记忆提示，不编造词源"
+      "memoryHint": "一句简短记忆提示，不编造词源",
+      "synonyms": [{"word": "同义词", "note": "一句极简辨析"}],
+      "antonyms": [{"word": "反义词", "note": "一句极简辨析"}],
+      "similarForms": [{"word": "形近词", "note": "一句极简辨析"}]
     }
   ]
 }
 必须原样返回每个 entryId，不能增加不存在的 ID。释义只填写可直接背诵的简洁中文词义，
 不得加入括号、方括号、语境说明、来源说明、例句解释或“在本文中”“这里指”等标注。
+同义词/反义词/形近词每组 0-3 条，辨析各用一句话（30 字以内）说明差别或易混点；
+如果该词没有自然的同义、反义或形近词，对应数组返回空数组 []，不要强行编造或凑数。
 """
     items = [
         {
@@ -445,6 +565,7 @@ def _translate_vocabulary_batch(
                 UPDATE vocabulary_entries
                 SET lemma = ?, phonetic = ?, part_of_speech = ?,
                     contextual_meaning = ?, common_meaning = ?, memory_hint = ?,
+                    synonyms = ?, antonyms = ?, similar_forms = ?,
                     translation_status = 'ready', translation_error = '',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND user_edited = 0
@@ -457,6 +578,9 @@ def _translate_vocabulary_batch(
                     contextual,
                     clean_meaning(item.get("commonMeaning", ""), 1000),
                     model_text(item.get("memoryHint", ""), 1000),
+                    json.dumps(_discrimination_list(item.get("synonyms")), ensure_ascii=False),
+                    json.dumps(_discrimination_list(item.get("antonyms")), ensure_ascii=False),
+                    json.dumps(_discrimination_list(item.get("similarForms")), ensure_ascii=False),
                     entry_id,
                 ),
             )
@@ -559,11 +683,16 @@ def translate_vocabulary_entry(entry_id: int) -> None:
   "part_of_speech": "简短词性",
   "contextual_meaning": "该原句中的准确中文释义",
   "common_meaning": "一到三个常见中文释义",
-  "memory_hint": "一句简短记忆提示，不编造词源"
+  "memory_hint": "一句简短记忆提示，不编造词源",
+  "synonyms": [{"word": "同义词", "note": "一句极简辨析"}],
+  "antonyms": [{"word": "反义词", "note": "一句极简辨析"}],
+  "similar_forms": [{"word": "形近词", "note": "一句极简辨析"}]
 }
 释义字段只允许填写可直接背诵的简洁中文词义。不得添加括号、方括号、语境说明、
 来源说明、适用对象、例句解释或“在本文中”“这里指”等标注。
 例如只写“随机地；任意地”，不要写“随机地（指面试者的选择方式）”。
+同义词/反义词/形近词每组 0-3 条，辨析各用一句话（30 字以内）说明差别或易混点；
+如果该词没有自然的同义、反义或形近词，对应数组返回空数组 []，不要强行编造或凑数。
 """
         user_payload = {
             "term": entry["term"],
@@ -593,6 +722,7 @@ def translate_vocabulary_entry(entry_id: int) -> None:
                 UPDATE vocabulary_entries
                 SET lemma = ?, phonetic = ?, part_of_speech = ?,
                     contextual_meaning = ?, common_meaning = ?, memory_hint = ?,
+                    synonyms = ?, antonyms = ?, similar_forms = ?,
                     translation_status = 'ready', translation_error = '',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND user_edited = 0
@@ -604,6 +734,9 @@ def translate_vocabulary_entry(entry_id: int) -> None:
                     clean_meaning(result.get("contextual_meaning", ""), 1000),
                     clean_meaning(result.get("common_meaning", ""), 1000),
                     model_text(result.get("memory_hint", ""), 1000),
+                    json.dumps(_discrimination_list(result.get("synonyms")), ensure_ascii=False),
+                    json.dumps(_discrimination_list(result.get("antonyms")), ensure_ascii=False),
+                    json.dumps(_discrimination_list(result.get("similar_forms")), ensure_ascii=False),
                     entry_id,
                 ),
             )
