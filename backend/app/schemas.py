@@ -99,6 +99,11 @@ class DraftUpdate(BaseModel):
     reason: str = "用户编辑"
 
 
+class ImportAnswersUpdate(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+    reason: str = "人工录入标准答案"
+
+
 class QuestionBankConflictResolution(BaseModel):
     paper_key: str = Field(min_length=3, max_length=200)
     action: Literal["keep_existing", "replace_with_imported"]

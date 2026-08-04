@@ -22,9 +22,13 @@ OPTION_MARK_RE = re.compile(
 )
 QUESTION_NUMBER_RE = re.compile(r"^\s*([1-5]?\d)\s*[\.．、)]\s*(.+)$", re.S)
 TEXT_MARK_RE = re.compile(r"^\s*Text\s*([1-4lI])\s*$", re.I)
+INVISIBLE_TEXT_RE = re.compile(
+    r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ue000-\uf8ff]"
+)
 
 
 def clean_text(value: str) -> str:
+    value = INVISIBLE_TEXT_RE.sub("", value)
     value = value.replace("\u00a0", " ").replace("\u3000", " ")
     value = value.replace("〇", "0").replace("○", "0")
     value = value.replace("［", "[").replace("］", "]")
@@ -365,67 +369,105 @@ def _parse_numbered_options(text: str) -> list[dict[str, Any]]:
     return result
 
 
-def extract_answer_key(blocks: list[str]) -> dict[int, str]:
-    tail = " ".join(blocks[-100:])
-    answer_start = max(
-        tail.lower().rfind("答案"),
-        tail.lower().rfind("answer key"),
-        tail.lower().rfind("答案速查"),
-    )
-    if answer_start >= 0:
-        tail = tail[answer_start:]
-
+def _extract_answers_from_text(text: str) -> dict[int, str]:
     answers: dict[int, str] = {}
     for number, letter in re.findall(
-        r"(?<!\d)([1-5]?\d)\s*[\.．、:]\s*([A-H])", tail, re.I
-    ):
-        numeric = int(number)
-        if 1 <= numeric <= 45:
-            answers[numeric] = letter.upper()
-
-    # A small number of source files drop the number before one answer, e.g.
-    # "... 9.D10.C C 12.A ...". Infer only the immediately missing number.
-    for letter, following_number in re.findall(
-        r"(?:^|\s)([A-H])\s+(?=([1-5]?\d)\s*[\.．、:])", tail, re.I
-    ):
-        inferred = int(following_number) - 1
-        if 1 <= inferred <= 45 and inferred not in answers:
-            answers[inferred] = letter.upper()
-
-    compact = re.sub(r"\s+", "", tail).upper()
-    for start, end, letters in re.findall(
-        r"([1-4]?\d)\s*[-~～至]\s*([1-4]?\d)\s*([A-H]{5,20})", compact
-    ):
-        first, last = int(start), int(end)
-        expected = last - first + 1
-        if expected > 0 and len(letters) >= expected:
-            for offset, letter in enumerate(letters[:expected]):
-                answers[first + offset] = letter
-
-    # Compressed modern keys can omit spaces between ranges.
-    for first in range(1, 46, 5):
-        last = first + 4
-        match = re.search(
-            rf"{first}(?:-|~|～|至){last}([A-H]{{5}})", compact
-        )
-        if match:
-            for offset, letter in enumerate(match.group(1)):
-                answers[first + offset] = letter
-    return answers
-
-
-def extract_pdf_answer_key(path: Path) -> dict[int, str]:
-    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
-    answers: dict[int, str] = {}
-    for number, letter in re.findall(
-        r"(?<!\d)([1-4]?\d)\s*[\.．、:]?\s*([A-H])(?=\s|$|\d|[.,，。])",
+        r"(?<!\d)([1-5]?\d)\s*[\.．、:：]\s*([A-H])(?=\s|$|\d|[.,，。])",
         text,
         re.I,
     ):
         numeric = int(number)
         if 1 <= numeric <= 45:
             answers[numeric] = letter.upper()
+
+    compact = re.sub(r"\s+", "", text).upper()
+    for start, end, letters in re.findall(
+        r"(?<!\d)([1-4]?\d)[-~～至–—]([1-4]?\d)[:：]?([A-H]{2,20})",
+        compact,
+    ):
+        first, last = int(start), int(end)
+        expected = last - first + 1
+        if expected > 0 and len(letters) == expected:
+            for offset, letter in enumerate(letters[:expected]):
+                answers[first + offset] = letter
+
     return answers
+
+
+def extract_answer_key(
+    blocks: list[str],
+    *,
+    require_heading: bool = True,
+) -> dict[int, str]:
+    text = "\n".join(blocks)
+    heading_matches = list(
+        re.finditer(
+            r"答案速查|参考答案|标准答案|answer\s*key|^\s*answers?\s*[:：]?\s*$",
+            text,
+            re.I | re.M,
+        )
+    )
+    if require_heading:
+        if not heading_matches:
+            return {}
+        text = text[heading_matches[-1].start() :]
+    return _extract_answers_from_text(text)
+
+
+def extract_pdf_answer_key(path: Path) -> dict[int, str]:
+    reader = PdfReader(str(path))
+    layout_pages: list[str] = []
+    plain_pages: list[str] = []
+    for page in reader.pages:
+        plain_pages.append(page.extract_text() or "")
+        try:
+            layout_pages.append(page.extract_text(extraction_mode="layout") or "")
+        except Exception:
+            layout_pages.append(plain_pages[-1])
+    layout_text = "\n".join(layout_pages)
+    answers = _extract_answers_from_text(layout_text)
+    if answers:
+        return answers
+    return _extract_answers_from_text("\n".join(plain_pages))
+
+
+def extract_answer_attachment(path: Path) -> tuple[dict[int, str], dict[str, Any]]:
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        reader = PdfReader(str(path))
+        extracted_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        has_text_layer = len(re.sub(r"\s+", "", extracted_text)) >= 20
+        if not has_text_layer:
+            return {}, {
+                "status": "manual_required",
+                "message": "答案 PDF 未检测到可靠文字层，请人工录入答案",
+            }
+        answers = extract_pdf_answer_key(path)
+        if not answers:
+            return {}, {
+                "status": "manual_required",
+                "message": "答案 PDF 未识别出可靠的客观题答案，请人工录入",
+            }
+        return answers, {
+            "status": "parsed",
+            "message": f"已从文本型 PDF 识别 {len(answers)} 道答案，请发布前核对",
+        }
+
+    blocks, _, converted = extract_blocks(path)
+    try:
+        answers = extract_answer_key(blocks, require_heading=False)
+    finally:
+        if converted:
+            shutil.rmtree(converted.parent, ignore_errors=True)
+    if not answers:
+        return {}, {
+            "status": "manual_required",
+            "message": "答案 Word 未识别出可靠的客观题答案，请人工录入",
+        }
+    return answers, {
+        "status": "parsed",
+        "message": f"已从答案 Word 识别 {len(answers)} 道答案，请发布前核对",
+    }
 
 
 def find_companion_answer_pdf(path: Path, year: int | None) -> Path | None:
@@ -818,15 +860,66 @@ def _parse_part_b(blocks: list[str], answers: dict[int, str]) -> dict[str, Any]:
     }
 
 
+def _has_objective_part_b(blocks: list[str]) -> bool:
+    for index, text in enumerate(blocks):
+        if not re.match(r"^\s*Part\s*B\s*$", text, re.I):
+            continue
+        context = " ".join(blocks[index : index + 5]).lower()
+        if re.search(r"translate\s+the\s+underlined|translation", context):
+            return False
+        if re.search(
+            r"questions?.*?41.*?45|list\s+a|extra\s+choices|wrong\s+order|"
+            r"reorganize|subheading|numbered\s+(?:name|person|paragraph)",
+            context,
+            re.I,
+        ):
+            return True
+    return any(
+        re.search(r"(?:for\s+)?questions?.*?41.*?45", text, re.I)
+        and (
+            re.search(r"list\s+A", text, re.I)
+            or "numbered" in text.lower()
+        )
+        for text in blocks
+    )
+
+
+def objective_question_numbers(draft: dict[str, Any]) -> list[int]:
+    return sorted(
+        {
+            int(question["number"])
+            for unit in draft.get("units", [])
+            for question in unit.get("questions", [])
+        }
+    )
+
+
+def apply_answers_to_draft(draft: dict[str, Any]) -> None:
+    answers = draft.setdefault("answers", {})
+    for unit in draft.get("units", []):
+        for question in unit.get("questions", []):
+            number = str(question.get("number", ""))
+            answer = str(answers.get(number, "") or "").strip().upper()
+            answers[number] = answer
+            question["answer"] = answer
+
+
 def validate_draft(draft: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
+    apply_answers_to_draft(draft)
     answers = draft["answers"]
-    missing_answers = [number for number in range(1, 46) if not answers.get(str(number))]
+    expected_numbers = objective_question_numbers(draft)
+    missing_answers = [
+        number for number in expected_numbers if not answers.get(str(number))
+    ]
     if missing_answers:
         warnings.append(f"缺少标准答案：{missing_answers}")
+    if (
+        draft.get("answer_status", {}).get("status") == "parsed"
+        and not draft.get("answers_confirmed", False)
+    ):
+        warnings.append("自动识别的标准答案尚未人工确认")
     units = draft["units"]
-    if len(units) != 6:
-        warnings.append(f"应识别6个练习单元，当前为{len(units)}个")
     cloze = next((unit for unit in units if unit["unit_type"] == "cloze"), None)
     if not cloze or len(cloze["questions"]) != 20:
         warnings.append("完型填空未识别为20题")
@@ -846,46 +939,109 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
         for question in unit["questions"]:
             if len(question["options"]) != 4:
                 warnings.append(f"第{question['number']}题选项数量不是4")
-    part_b = next((unit for unit in units if unit["unit_type"] == "part_b"), None)
-    if not part_b or len(part_b["questions"]) != 5:
-        warnings.append("Part B 未识别为5题")
-    elif not 7 <= len(part_b.get("shared_data", {}).get("candidates", {})) <= 8:
-        warnings.append(
-            "Part B 候选项数量异常："
-            f"{len(part_b.get('shared_data', {}).get('candidates', {}))}"
-        )
-    elif any(
-        question.get("answer")
-        and question["answer"]
-        not in part_b.get("shared_data", {}).get("candidates", {})
-        for question in part_b["questions"]
-    ):
-        warnings.append("Part B 标准答案未能对应候选项")
+    part_b_units = [unit for unit in units if unit["unit_type"] == "part_b"]
+    if part_b_units:
+        part_b = part_b_units[0]
+        if len(part_b["questions"]) != 5:
+            warnings.append("Part B 未识别为5题")
+        elif not 7 <= len(part_b.get("shared_data", {}).get("candidates", {})) <= 8:
+            warnings.append(
+                "Part B 候选项数量异常："
+                f"{len(part_b.get('shared_data', {}).get('candidates', {}))}"
+            )
+        elif any(
+            question.get("answer")
+            and question["answer"]
+            not in part_b.get("shared_data", {}).get("candidates", {})
+            for question in part_b["questions"]
+        ):
+            warnings.append("Part B 标准答案未能对应候选项")
+    expected_units = 5 + (1 if part_b_units else 0)
+    if len(units) != expected_units:
+        warnings.append(f"应识别{expected_units}个客观题练习单元，当前为{len(units)}个")
     for unit in units:
         for question in unit["questions"]:
             if not question.get("answer"):
                 warnings.append(f"第{question['number']}题没有答案")
+            elif question["answer"] not in {
+                option.get("key")
+                for option in question.get("options", [])
+            }:
+                warnings.append(f"第{question['number']}题答案未对应现有选项")
     return list(dict.fromkeys(warnings))
 
 
-def parse_exam(path: Path, answer_path: Path | None = None) -> dict[str, Any]:
+def parse_exam(
+    path: Path,
+    answer_path: Path | None = None,
+    *,
+    source_name: str | None = None,
+    answer_name: str | None = None,
+) -> dict[str, Any]:
     blocks, detected_format, converted = extract_blocks(path)
     try:
-        year_match = re.search(r"(20\d{2})", path.name)
+        logical_source_name = source_name or path.name
+        year_match = re.search(r"(20\d{2})", logical_source_name)
         if not year_match:
             year_match = re.search(r"(20\d{2})", " ".join(blocks[:10]))
         year = int(year_match.group(1)) if year_match else None
         answer_key = extract_answer_key(blocks)
-        answer_source = "Word 文档内置答案"
-        if len(answer_key) < 45:
-            companion = answer_path or find_companion_answer_pdf(path, year)
-            if companion:
-                pdf_answers = extract_pdf_answer_key(companion)
-                answer_key.update(pdf_answers)
-                answer_source = companion.name
+        answer_sources = {
+            str(number): "试卷 Word 内置答案" for number in answer_key
+        }
+        answer_status = {
+            "status": "parsed" if answer_key else "missing",
+            "message": (
+                f"已从试卷 Word 识别 {len(answer_key)} 道答案"
+                if answer_key
+                else "试卷 Word 未检测到标准答案"
+            ),
+        }
+        answer_source = "试卷 Word 内置答案" if answer_key else "未提供"
+        attachment_used = False
+        companion = answer_path
+        if companion:
+            attachment_answers, attachment_status = extract_answer_attachment(companion)
+            answer_key.update(attachment_answers)
+            for number in attachment_answers:
+                answer_sources[str(number)] = answer_name or companion.name
+            answer_status = attachment_status
+            answer_source = answer_name or companion.name
+            attachment_used = True
+        elif not answer_key:
+            legacy_companion = find_companion_answer_pdf(path, year)
+            if legacy_companion:
+                attachment_answers, attachment_status = extract_answer_attachment(
+                    legacy_companion
+                )
+                answer_key.update(attachment_answers)
+                for number in attachment_answers:
+                    answer_sources[str(number)] = legacy_companion.name
+                answer_status = attachment_status
+                answer_source = legacy_companion.name
+                attachment_used = True
         units = [_parse_cloze(blocks, answer_key)]
         units.extend(_parse_reading(blocks, answer_key))
-        units.append(_parse_part_b(blocks, answer_key))
+        if _has_objective_part_b(blocks):
+            units.append(_parse_part_b(blocks, answer_key))
+        expected_numbers = {
+            question["number"]
+            for unit in units
+            for question in unit.get("questions", [])
+        }
+        answer_key = {
+            number: answer
+            for number, answer in answer_key.items()
+            if number in expected_numbers
+        }
+        answer_sources = {
+            number: source
+            for number, source in answer_sources.items()
+            if int(number) in expected_numbers
+        }
+        for unit in units:
+            for question in unit.get("questions", []):
+                question["answer"] = answer_key.get(question["number"], "")
         for unit in units:
             if unit["unit_type"] == "cloze":
                 unit["passage"] = _ensure_numbered_blanks(
@@ -909,13 +1065,21 @@ def parse_exam(path: Path, answer_path: Path | None = None) -> dict[str, Any]:
         draft = {
             "year": year,
             "subject": "英语一",
-            "title": f"{year}年考研英语一真题" if year else path.stem,
+            "title": (
+                f"{year}年考研英语一真题"
+                if year
+                else Path(logical_source_name).stem
+            ),
             "detected_format": detected_format,
-            "source_file": path.name,
+            "source_file": logical_source_name,
             "answer_source": answer_source,
+            "answer_status": answer_status,
+            "answers_confirmed": not attachment_used,
+            "answer_sources": answer_sources,
             "answers": {str(key): value for key, value in answer_key.items()},
             "units": units,
         }
+        apply_answers_to_draft(draft)
         draft["warnings"] = validate_draft(draft)
         return draft
     finally:

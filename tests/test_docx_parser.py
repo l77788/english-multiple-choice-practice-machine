@@ -6,15 +6,23 @@ from lxml import etree
 
 from backend.app.services.docx_parser import (
     NS,
+    _extract_answers_from_text,
     _ensure_numbered_blanks,
     _extract_ooxml_text,
+    _has_objective_part_b,
     _remove_duplicate_cloze_number_noise,
+    apply_answers_to_draft,
     clean_text,
+    extract_answer_key,
+    validate_draft,
 )
 from backend.app.services.passage_cleanup import repair_inline_blank_paragraph_breaks
 
 
 class OoxmlBlankExtractionTests(unittest.TestCase):
+    def test_private_word_control_character_is_removed(self) -> None:
+        self.assertEqual(clean_text("Text 3\ue004"), "Text 3")
+
     def test_underlined_question_number_becomes_visible_blank(self) -> None:
         paragraph = etree.fromstring(
             f"""
@@ -119,6 +127,69 @@ class OoxmlBlankExtractionTests(unittest.TestCase):
             repair_inline_blank_paragraph_breaks(completed),
             completed,
         )
+
+    def test_question_body_is_not_mistaken_for_answer_key(self) -> None:
+        blocks = [
+            "Mark your answers on ANSWER SHEET 1.",
+            "26. How should the author respond?",
+            "[A] Carefully. [B] Directly.",
+        ]
+        self.assertEqual(extract_answer_key(blocks), {})
+
+    def test_grouped_answer_ranges_are_supported(self) -> None:
+        self.assertEqual(
+            _extract_answers_from_text("1-5: ADCBB\n6-10: ADDCB"),
+            {
+                1: "A", 2: "D", 3: "C", 4: "B", 5: "B",
+                6: "A", 7: "D", 8: "D", 9: "C", 10: "B",
+            },
+        )
+
+    def test_translation_part_b_is_not_treated_as_objective(self) -> None:
+        blocks = [
+            "Part B",
+            "Read the following text carefully and then translate the underlined segments into Chinese.",
+        ]
+        self.assertFalse(_has_objective_part_b(blocks))
+
+    def test_validation_uses_questions_present_in_the_draft(self) -> None:
+        def unit(unit_type: str, title: str, sequence: int, numbers: range) -> dict:
+            return {
+                "unit_type": unit_type,
+                "subtype": "cloze" if unit_type == "cloze" else "reading_a",
+                "title": title,
+                "sequence": sequence,
+                "passage": "Passage",
+                "shared_data": {},
+                "questions": [
+                    {
+                        "number": number,
+                        "stem": "",
+                        "options": [
+                            {"key": key, "content": key}
+                            for key in ("A", "B", "C", "D")
+                        ],
+                        "answer": "A",
+                        "score": 0.5 if number <= 20 else 2.0,
+                    }
+                    for number in numbers
+                ],
+            }
+
+        draft = {
+            "answers": {str(number): "A" for number in range(1, 41)},
+            "answer_status": {"status": "confirmed"},
+            "answers_confirmed": True,
+            "units": [
+                unit("cloze", "完型填空", 1, range(1, 21)),
+                unit("reading", "阅读 Text 1", 2, range(21, 26)),
+                unit("reading", "阅读 Text 2", 3, range(26, 31)),
+                unit("reading", "阅读 Text 3", 4, range(31, 36)),
+                unit("reading", "阅读 Text 4", 5, range(36, 41)),
+            ],
+        }
+        apply_answers_to_draft(draft)
+        self.assertEqual(validate_draft(draft), [])
 
 
 if __name__ == "__main__":

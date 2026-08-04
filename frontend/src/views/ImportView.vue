@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { Download, FileArchive, FileCheck2, FileUp, RefreshCw, Sparkles } from 'lucide-vue-next'
-import { onMounted, ref } from 'vue'
-import { api, get, post, put } from '../api'
+import { Check, Download, FileArchive, FileCheck2, FileKey2, FileUp, RefreshCw, Sparkles } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
+import { api, get, patch, post, put } from '../api'
 
 const jobs = ref<any[]>([])
 const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
+const selectedAnswerFile = ref<File | null>(null)
+const bulkAnswers = ref<Record<string, string>>({})
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -15,6 +17,14 @@ const esqJobs = ref<any[]>([])
 const esqCurrent = ref<any>(null)
 const selectedEsqFile = ref<File | null>(null)
 const esqResolutions = ref<Record<string, 'keep_existing' | 'replace_with_imported'>>({})
+const answerUnits = computed(() => current.value?.draft?.units || [])
+const answerProgress = computed(() => {
+  const questions = answerUnits.value.flatMap((unit: any) => unit.questions || [])
+  return {
+    completed: questions.filter((question: any) => String(current.value?.draft?.answers?.[question.number] || '').trim()).length,
+    total: questions.length,
+  }
+})
 
 async function loadJobs() { jobs.value = await get('/imports') }
 async function loadEsqJobs() { esqJobs.value = await get('/question-banks/imports') }
@@ -24,8 +34,10 @@ async function upload() {
   if (!selectedFile.value) return
   busy.value = true; error.value = ''
   const form = new FormData(); form.append('file', selectedFile.value)
+  if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
   try {
     current.value = await api('/imports', { method: 'POST', body: form })
+    bulkAnswers.value = {}
     await loadJobs()
   } catch (e) { error.value = String(e) }
   finally { busy.value = false }
@@ -34,11 +46,47 @@ async function upload() {
 async function openJob(id: number) {
   current.value = await get(`/imports/${id}`)
   current.value.draft = current.value.draft_data
+  bulkAnswers.value = {}
 }
 
 async function saveDraft() {
   const result: any = await put(`/imports/${current.value.id}`, { draft_data: current.value.draft, reason: '用户编辑' })
   current.value.draft = result.draft; notice.value = '草稿已保存'
+}
+
+function setAnswer(question: any, answer: string) {
+  if (!current.value?.draft) return
+  current.value.draft.answers ||= {}
+  current.value.draft.answer_sources ||= {}
+  current.value.draft.answers[String(question.number)] = answer
+  question.answer = answer
+  if (answer) current.value.draft.answer_sources[String(question.number)] = '人工录入'
+  else delete current.value.draft.answer_sources[String(question.number)]
+}
+
+function applyBulkAnswers(unit: any) {
+  const letters = String(bulkAnswers.value[unit.title] || '').toUpperCase().match(/[A-H]/g) || []
+  if (letters.length !== unit.questions.length) {
+    error.value = `${unit.title} 需要输入 ${unit.questions.length} 个答案，当前识别到 ${letters.length} 个`
+    return
+  }
+  unit.questions.forEach((question: any, index: number) => setAnswer(question, letters[index]))
+  error.value = ''
+  notice.value = `${unit.title} 的答案已填入草稿，点击“保存答案”后生效`
+}
+
+async function saveAnswers() {
+  if (!current.value?.draft) return
+  busy.value = true; error.value = ''
+  try {
+    const result: any = await patch(`/imports/${current.value.id}/answers`, {
+      answers: current.value.draft.answers || {},
+      reason: '答案校对面板人工录入',
+    })
+    current.value.draft = result.draft
+    notice.value = `标准答案已保存（${answerProgress.value.completed}/${answerProgress.value.total}）`
+  } catch (e) { error.value = String(e) }
+  finally { busy.value = false }
 }
 
 async function askAi() {
@@ -134,12 +182,14 @@ async function exportEsq(includeLabels = false) {
 
 <template>
   <div class="page">
-    <div class="page-head"><div><span class="eyebrow">IMPORT & REVIEW</span><h1>导入题库</h1><p class="lead">先生成草稿，检查文章、题目、选项和标准答案，再批准入库。</p></div></div>
+    <div class="page-head"><div><span class="eyebrow">IMPORT & REVIEW</span><h1>导入题库</h1><p class="lead">试卷和答案分别解析。即使答案缺失，也可以先保存题目草稿，再人工补全。</p></div></div>
     <div v-if="error" class="warning">{{ error }}</div><div v-if="notice" class="card" style="margin-bottom:16px;color:var(--success)">{{ notice }}</div>
     <div class="grid" style="grid-template-columns:320px 1fr">
       <aside>
         <div class="card">
-          <label class="field"><span>选择 Word 真题</span><input type="file" accept=".doc,.docx" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <label class="field"><span>试卷 Word（必选）</span><input type="file" accept=".doc,.docx" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <label class="field"><span>答案附件（可选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedAnswerFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <p class="lead import-file-hint">支持 DOC、DOCX 和文本型 PDF。扫描版或水印干扰严重的 PDF 会回退到人工录入。</p>
           <button class="button" style="width:100%" :disabled="!selectedFile || busy" @click="upload"><FileUp :size="16" />{{ busy ? '正在分析…' : '上传并解析' }}</button>
         </div>
         <div class="card">
@@ -194,8 +244,38 @@ async function exportEsq(includeLabels = false) {
       </section>
       <section v-if="current?.draft" class="grid">
         <div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center"><div><span class="pill">{{ current.draft.detected_format }}</span><h2 style="margin-top:12px">{{ current.draft.title }}</h2><p class="lead" style="font-size:12px;margin-top:7px">标准答案来源：{{ current.draft.answer_source || 'Word 文档' }}</p></div><button class="button" :disabled="current.draft.warnings?.length" @click="publish"><FileCheck2 :size="17" />批准入库</button></div>
+          <div style="display:flex;justify-content:space-between;align-items:center"><div><span class="pill">{{ current.draft.detected_format }}</span><h2 style="margin-top:12px">{{ current.draft.title }}</h2><p class="lead" style="font-size:12px;margin-top:7px">试卷来源：{{ current.draft.source_file }} · 答案来源：{{ current.draft.answer_source || '未提供' }}</p></div><button class="button" :disabled="current.draft.warnings?.length" @click="publish"><FileCheck2 :size="17" />批准入库</button></div>
+          <div class="answer-status" :class="current.draft.answer_status?.status || 'missing'">
+            <FileKey2 :size="18" />
+            <div><strong>{{ answerProgress.completed }}/{{ answerProgress.total }} 道答案已填写</strong><span>{{ current.draft.answer_status?.message || '请在下方校对并补全标准答案' }}</span></div>
+          </div>
           <div v-for="warning in current.draft.warnings" class="warning" :key="warning">{{ warning }}</div>
+        </div>
+        <div class="card answer-editor">
+          <div class="answer-editor-head">
+            <div><h3>答案校对</h3><p class="lead">自动识别只负责预填。你可以修改单题答案，也可以按篇目粘贴答案串。</p></div>
+            <button class="button" :disabled="busy" @click="saveAnswers"><Check :size="16" />保存答案</button>
+          </div>
+          <details v-for="unit in answerUnits" :key="unit.title" class="answer-unit" open>
+            <summary>
+              <span>{{ unit.title }}</span>
+              <small>{{ unit.questions.filter((question:any) => current.draft.answers?.[question.number]).length }}/{{ unit.questions.length }}</small>
+            </summary>
+            <div class="bulk-answer-row">
+              <label :for="`bulk-${unit.sequence}`">批量粘贴</label>
+              <input :id="`bulk-${unit.sequence}`" v-model="bulkAnswers[unit.title]" :placeholder="`例如：${'A'.repeat(unit.questions.length)}`" @keyup.enter="applyBulkAnswers(unit)" />
+              <button class="button secondary compact" @click="applyBulkAnswers(unit)">填入本篇</button>
+            </div>
+            <div class="answer-question-grid">
+              <label v-for="question in unit.questions" :key="question.number" class="answer-question" :class="{missing:!current.draft.answers?.[question.number]}">
+                <span>{{ question.number }}</span>
+                <select :value="current.draft.answers?.[question.number] || ''" @change="setAnswer(question, ($event.target as HTMLSelectElement).value)">
+                  <option value="">未填</option>
+                  <option v-for="option in question.options" :key="option.key" :value="option.key">{{ option.key }}</option>
+                </select>
+              </label>
+            </div>
+          </details>
         </div>
         <div class="card">
           <h3>模型辅助校正</h3><p class="lead">模型只生成建议；正式应用前由你确认，答案变化会特别提示。</p>

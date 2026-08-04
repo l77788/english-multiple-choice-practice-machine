@@ -10,8 +10,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from ..config import UPLOAD_DIR
 from ..database import get_db
-from ..schemas import DraftUpdate
-from ..services.docx_parser import parse_exam, publish_draft, validate_draft
+from ..schemas import DraftUpdate, ImportAnswersUpdate
+from ..services.docx_parser import (
+    apply_answers_to_draft,
+    objective_question_numbers,
+    parse_exam,
+    publish_draft,
+    validate_draft,
+)
 
 
 router = APIRouter(prefix="/imports", tags=["imports"])
@@ -38,20 +44,42 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
 @router.post("")
 async def upload_import(
     file: UploadFile = File(...),
+    answer_file: UploadFile | None = File(default=None),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
         raise HTTPException(400, "请选择 Word 文件")
+    if answer_file and (
+        not answer_file.filename
+        or not answer_file.filename.lower().endswith((".docx", ".doc", ".pdf"))
+    ):
+        raise HTTPException(400, "答案文件仅支持 DOC、DOCX 或 PDF")
     suffix = Path(file.filename).suffix or ".docx"
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name
+    stored_answer_path: Path | None = None
     with stored_path.open("wb") as target:
         shutil.copyfileobj(file.file, target)
+    if answer_file and answer_file.filename:
+        answer_suffix = Path(answer_file.filename).suffix or ".docx"
+        stored_answer_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{answer_suffix}"
+        with stored_answer_path.open("wb") as target:
+            shutil.copyfileobj(answer_file.file, target)
     try:
-        draft = parse_exam(stored_path)
+        draft = parse_exam(
+            stored_path,
+            answer_path=stored_answer_path,
+            source_name=file.filename,
+            answer_name=answer_file.filename if answer_file else None,
+        )
     except Exception as error:
         stored_path.unlink(missing_ok=True)
+        if stored_answer_path:
+            stored_answer_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Word解析失败：{error}") from error
+    finally:
+        if stored_answer_path:
+            stored_answer_path.unlink(missing_ok=True)
 
     cursor = connection.execute(
         """
@@ -106,6 +134,24 @@ def update_draft(
         raise HTTPException(404, "导入任务不存在")
     old_data = json.loads(row["draft_data"])
     draft = request.draft_data
+    if old_data.get("answers") != draft.get("answers"):
+        old_sources = old_data.get("answer_sources", {})
+        new_sources = draft.setdefault("answer_sources", {})
+        old_answers = old_data.get("answers", {})
+        new_answers = draft.get("answers", {})
+        for number, answer in new_answers.items():
+            if answer and old_answers.get(number) != answer:
+                new_sources[number] = "人工录入"
+            elif answer and number not in new_sources and number in old_sources:
+                new_sources[number] = old_sources[number]
+            elif not answer:
+                new_sources.pop(number, None)
+        draft["answers_confirmed"] = True
+        draft["answer_status"] = {
+            "status": "confirmed",
+            "message": "人工编辑的标准答案已确认",
+        }
+    apply_answers_to_draft(draft)
     draft["warnings"] = validate_draft(draft)
     connection.execute(
         """
@@ -131,6 +177,92 @@ def update_draft(
             str(job_id),
             json.dumps(old_data, ensure_ascii=False),
             json.dumps(draft, ensure_ascii=False),
+        ),
+    )
+    connection.commit()
+    return {"draft": draft, "warnings": draft["warnings"]}
+
+
+@router.patch("/{job_id}/answers")
+def update_answers(
+    job_id: int,
+    request: ImportAnswersUpdate,
+    connection: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    row = connection.execute(
+        "SELECT draft_data FROM import_jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "导入任务不存在")
+    draft = json.loads(row["draft_data"])
+    old_answers = dict(draft.get("answers", {}))
+    answer_sources = draft.setdefault("answer_sources", {})
+    allowed_numbers = {
+        str(number) for number in objective_question_numbers(draft)
+    }
+    for number, answer in request.answers.items():
+        normalized_number = str(number).strip()
+        normalized_answer = str(answer).strip().upper()
+        if not normalized_number.isdigit():
+            raise HTTPException(422, f"无效题号：{number}")
+        if normalized_number not in allowed_numbers:
+            raise HTTPException(422, f"第 {normalized_number} 题不属于当前客观题草稿")
+        if normalized_answer and normalized_answer not in "ABCDEFGH":
+            raise HTTPException(422, f"第 {normalized_number} 题答案无效")
+        draft.setdefault("answers", {})[normalized_number] = normalized_answer
+        if normalized_answer:
+            if old_answers.get(normalized_number) != normalized_answer:
+                answer_sources[normalized_number] = "人工录入"
+            elif normalized_number not in answer_sources:
+                answer_sources[normalized_number] = "人工录入"
+        else:
+            answer_sources.pop(normalized_number, None)
+    draft["answers_confirmed"] = True
+    source_kinds = {
+        source
+        for number, source in answer_sources.items()
+        if draft.get("answers", {}).get(number)
+    }
+    if source_kinds == {"人工录入"}:
+        draft["answer_source"] = "人工录入"
+        draft["answer_status"] = {
+            "status": "confirmed",
+            "message": "人工录入答案已确认",
+        }
+    else:
+        draft["answer_source"] = (
+            "、".join(sorted(source_kinds)) if source_kinds else "人工录入"
+        )
+        draft["answer_status"] = {
+            "status": "confirmed",
+            "message": "自动识别与人工校对的答案已确认",
+        }
+    apply_answers_to_draft(draft)
+    draft["warnings"] = validate_draft(draft)
+    connection.execute(
+        """
+        UPDATE import_jobs
+        SET draft_data = ?, warnings = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            json.dumps(draft, ensure_ascii=False),
+            json.dumps(draft["warnings"], ensure_ascii=False),
+            job_id,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO revision_log
+            (import_job_id, entity_type, entity_ref, field_name,
+             old_value, new_value, source, approved)
+        VALUES (?, 'draft', ?, 'answers', ?, ?, 'user', 1)
+        """,
+        (
+            job_id,
+            str(job_id),
+            json.dumps(old_answers, ensure_ascii=False),
+            json.dumps(draft.get("answers", {}), ensure_ascii=False),
         ),
     )
     connection.commit()
@@ -163,4 +295,3 @@ def publish(
     )
     connection.commit()
     return {"published": True, "paper_id": paper_id, "warnings": warnings}
-
