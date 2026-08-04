@@ -122,6 +122,7 @@ class AiCorrectionRequest(BaseModel):
 class ModelAssistRequest(BaseModel):
     profile_id: int | None = None
     model: str = ""
+    correct_structure: bool = False
 
 
 class VocabularyCreate(BaseModel):

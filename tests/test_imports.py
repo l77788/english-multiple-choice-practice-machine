@@ -363,6 +363,78 @@ class ImportAnswerFlowTests(unittest.TestCase):
             )
         self.assertEqual(saved["answers"]["21"], "C")
 
+    def _upload_with_assist(self, data: dict, result: dict) -> dict:
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with (
+            patch.object(imports_router, "parse_exam", return_value=draft),
+            patch.object(imports_router, "document_text", return_value="document"),
+            patch.object(imports_router, "run_model_assist", return_value=(result, "raw")),
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files={
+                    "file": (
+                        "paper.docx",
+                        io.BytesIO(b"paper"),
+                        "application/octet-stream",
+                    )
+                },
+                data=data,
+            )
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def test_upload_model_assist_structure_fix_applied_when_enabled(self) -> None:
+        fixes = [
+            {
+                "number": 21,
+                "stem": "修正题干",
+                "options": [
+                    {"key": "A", "content": "新A"},
+                    {"key": "B", "content": "新B"},
+                    {"key": "C", "content": "新C"},
+                    {"key": "D", "content": "新D"},
+                ],
+            }
+        ]
+        body = self._upload_with_assist(
+            {
+                "use_model_assist": "true",
+                "model_assist_correct_structure": "true",
+            },
+            {"answer_map": {}, "question_fixes": fixes, "issues": []},
+        )
+        self.assertEqual(body["model_assist"]["status"], "applied")
+        self.assertEqual(body["model_assist"]["applied_fixes"], 1)
+        question = body["draft"]["units"][0]["questions"][0]
+        self.assertEqual(question["stem"], "修正题干")
+        self.assertEqual(question["options"][0]["content"], "新A")
+
+    def test_upload_model_assist_structure_fix_ignored_when_disabled(self) -> None:
+        fixes = [
+            {
+                "number": 21,
+                "stem": "不应生效",
+                "options": [
+                    {"key": "A", "content": "不应生效"},
+                    {"key": "B", "content": "新B"},
+                    {"key": "C", "content": "新C"},
+                    {"key": "D", "content": "新D"},
+                ],
+            }
+        ]
+        body = self._upload_with_assist(
+            {"use_model_assist": "true"},
+            {"answer_map": {}, "question_fixes": fixes, "issues": []},
+        )
+        self.assertEqual(body["model_assist"]["status"], "applied")
+        self.assertEqual(body["model_assist"]["applied_fixes"], 0)
+        question = body["draft"]["units"][0]["questions"][0]
+        self.assertEqual(question["stem"], "Question")
+        self.assertEqual(question["options"][0]["content"], "A")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
 const selectedAnswerFile = ref<File | null>(null)
 const useModelAssist = ref(true)
+const modelAssistRewrite = ref(false)
 const assistDialogOpen = ref(false)
 const assistError = ref('')
 const assistBusy = ref(false)
@@ -43,6 +44,7 @@ async function upload() {
   const form = new FormData(); form.append('file', selectedFile.value)
   if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
   form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
+  form.append('model_assist_correct_structure', modelAssistRewrite.value ? 'true' : 'false')
   try {
     current.value = await api('/imports', { method: 'POST', body: form })
     const assist = current.value.model_assist
@@ -78,6 +80,7 @@ async function retryAssist() {
     const result: any = await post(`/imports/${current.value.id}/model-assist`, {
       profile_id: Number(profileId),
       model: modelId,
+      correct_structure: modelAssistRewrite.value,
     })
     if (result.model_assist?.status === 'failed') {
       assistError.value = result.model_assist.error || '重试失败'
@@ -241,6 +244,10 @@ async function exportEsq(includeLabels = false) {
             <input v-model="useModelAssist" type="checkbox">
             <span>上传解析时用模型辅助定位题目与对应答案（默认开启）</span>
           </label>
+          <label class="import-assist-toggle">
+            <input v-model="modelAssistRewrite" type="checkbox" :disabled="!useModelAssist">
+            <span>允许模型直接修正题干与选项归属（默认关闭，风险较高）</span>
+          </label>
           <p class="lead import-file-hint">支持 DOC、DOCX 和文本型 PDF。扫描版或水印干扰严重的 PDF 会回退到人工录入。</p>
           <p v-if="useModelAssist" class="lead import-file-hint">本地解析完成后会自动调用默认模型核对答案，可能需要 30 秒以上。</p>
           <button class="button" style="width:100%" :disabled="!selectedFile || busy" @click="upload"><FileUp :size="16" />{{ busy ? '正在分析…' : '上传并解析' }}</button>
@@ -306,7 +313,7 @@ async function exportEsq(includeLabels = false) {
             <Sparkles :size="17" />
             <div>
               <strong>模型辅助解析已应用</strong>
-              <span>本次应用 {{ current.draft.model_assist.applied_answers }} 道答案（来源标注“模型辅助”），共识别 {{ current.draft.model_assist.answer_total }} 道；发现 {{ current.draft.model_assist.issue_count }} 个结构问题，见下方警告。{{ current.draft.model_assist.notes || '' }}</span>
+              <span>本次应用 {{ current.draft.model_assist.applied_answers }} 道答案（来源标注“模型辅助”）<template v-if="current.draft.model_assist.applied_fixes">，直接修正 {{ current.draft.model_assist.applied_fixes }} 处题干/选项</template>，共识别 {{ current.draft.model_assist.answer_total }} 道；发现 {{ current.draft.model_assist.issue_count }} 个结构问题，见下方警告。{{ current.draft.model_assist.notes || '' }}</span>
             </div>
           </div>
           <div v-for="warning in current.draft.warnings" class="warning" :key="warning">{{ warning }}</div>

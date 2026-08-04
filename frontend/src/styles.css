@@ -338,6 +338,7 @@ h2, h3 { margin: 0; }
 .import-assist-banner svg { flex:none; margin-top:2px; color:var(--primary); }
 .import-assist-dialog { display:flex; flex-direction:column; justify-content:center; text-align:left; }
 .import-assist-dialog .field select { width:100%; }
+.field-hint { margin:8px 0 0; font-size:11px; color:var(--muted); line-height:1.7; }
 .wrong-overview { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:16px; padding:18px 20px; border:1px solid var(--line); border-radius:18px; background:linear-gradient(120deg,color-mix(in srgb,var(--primary-soft) 75%,var(--surface)),color-mix(in srgb,var(--blue) 42%,var(--surface))); }
 .wrong-overview-copy { display:grid; gap:4px; }
 .wrong-overview-copy strong { font-size:17px; }

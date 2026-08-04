@@ -53,6 +53,7 @@ async def upload_import(
     file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
     use_model_assist: bool = Form(False),
+    model_assist_correct_structure: bool = Form(False),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
@@ -96,8 +97,13 @@ async def upload_import(
                     draft,
                     document_text(stored_path),
                     answer_text=answer_text,
+                    correct_structure=model_assist_correct_structure,
                 )
-                draft = apply_model_assist(draft, result)
+                draft = apply_model_assist(
+                    draft,
+                    result,
+                    correct_structure=model_assist_correct_structure,
+                )
                 draft["model_assist"]["phase"] = "upload"
                 if not draft.get("answers_confirmed"):
                     draft["answer_status"] = {
@@ -177,11 +183,13 @@ def model_assist_retry(
             answer_text=answer_text,
             profile_id=request.profile_id,
             model=request.model.strip() or None,
+            correct_structure=request.correct_structure,
         )
         draft = apply_model_assist(
             draft,
             result,
             model_name=request.model.strip(),
+            correct_structure=request.correct_structure,
         )
         draft["model_assist"]["phase"] = "retry"
         if not draft.get("answers_confirmed"):
