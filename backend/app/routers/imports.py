@@ -6,17 +6,24 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from ..config import UPLOAD_DIR
 from ..database import get_db
-from ..schemas import DraftUpdate, ImportAnswersUpdate
+from ..schemas import DraftUpdate, ImportAnswersUpdate, ModelAssistRequest
 from ..services.docx_parser import (
     apply_answers_to_draft,
+    find_companion_answer_pdf,
     objective_question_numbers,
     parse_exam,
     publish_draft,
     validate_draft,
+)
+from ..services.import_assist import (
+    apply_model_assist,
+    document_text,
+    extract_attachment_text,
+    run_model_assist,
 )
 
 
@@ -45,6 +52,7 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
 async def upload_import(
     file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
+    use_model_assist: bool = Form(False),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
@@ -65,6 +73,7 @@ async def upload_import(
         stored_answer_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{answer_suffix}"
         with stored_answer_path.open("wb") as target:
             shutil.copyfileobj(answer_file.file, target)
+    parse_context: dict[str, str] = {}
     try:
         draft = parse_exam(
             stored_path,
@@ -72,6 +81,39 @@ async def upload_import(
             source_name=file.filename,
             answer_name=answer_file.filename if answer_file else None,
         )
+        if use_model_assist:
+            answer_text = ""
+            if stored_answer_path:
+                answer_text = extract_attachment_text(stored_answer_path)
+            elif not draft.get("answers"):
+                companion = find_companion_answer_pdf(stored_path, draft.get("year"))
+                if companion:
+                    answer_text = extract_attachment_text(companion)
+            parse_context["answer_text"] = answer_text[:20000]
+            try:
+                result, _ = run_model_assist(
+                    connection,
+                    draft,
+                    document_text(stored_path),
+                    answer_text=answer_text,
+                )
+                draft = apply_model_assist(draft, result)
+                draft["model_assist"]["phase"] = "upload"
+                if not draft.get("answers_confirmed"):
+                    draft["answer_status"] = {
+                        "status": "parsed",
+                        "message": (
+                            f"模型辅助解析识别 {draft['model_assist']['answer_total']} 道答案，"
+                            "发布前请人工核对"
+                        ),
+                    }
+            except Exception as error:
+                draft["model_assist"] = {
+                    "status": "failed",
+                    "phase": "upload",
+                    "error": str(error)[:400],
+                    "fell_back_to_local": True,
+                }
     except Exception as error:
         stored_path.unlink(missing_ok=True)
         if stored_answer_path:
@@ -85,8 +127,8 @@ async def upload_import(
         """
         INSERT INTO import_jobs
             (filename, stored_path, detected_year, detected_format,
-             status, draft_data, warnings)
-        VALUES (?, ?, ?, ?, 'draft', ?, ?)
+             status, draft_data, warnings, parse_context)
+        VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)
         """,
         (
             file.filename,
@@ -95,6 +137,7 @@ async def upload_import(
             draft.get("detected_format"),
             json.dumps(draft, ensure_ascii=False),
             json.dumps(draft["warnings"], ensure_ascii=False),
+            json.dumps(parse_context, ensure_ascii=False),
         ),
     )
     connection.commit()
@@ -103,6 +146,98 @@ async def upload_import(
         "filename": file.filename,
         "draft": draft,
         "warnings": draft["warnings"],
+        "model_assist": draft.get("model_assist"),
+    }
+
+
+@router.post("/{job_id}/model-assist")
+def model_assist_retry(
+    job_id: int,
+    request: ModelAssistRequest,
+    connection: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    row = connection.execute(
+        "SELECT * FROM import_jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "导入任务不存在")
+    if row["status"] == "published":
+        raise HTTPException(409, "已发布题库不能重新解析")
+    draft = json.loads(row["draft_data"])
+    try:
+        parse_context = json.loads(row["parse_context"] or "{}")
+    except json.JSONDecodeError:
+        parse_context = {}
+    answer_text = str(parse_context.get("answer_text", ""))
+    try:
+        result, _ = run_model_assist(
+            connection,
+            draft,
+            document_text(Path(row["stored_path"])),
+            answer_text=answer_text,
+            profile_id=request.profile_id,
+            model=request.model.strip() or None,
+        )
+        draft = apply_model_assist(
+            draft,
+            result,
+            model_name=request.model.strip(),
+        )
+        draft["model_assist"]["phase"] = "retry"
+        if not draft.get("answers_confirmed"):
+            draft["answer_status"] = {
+                "status": "parsed",
+                "message": (
+                    f"模型辅助解析识别 {draft['model_assist']['answer_total']} 道答案，"
+                    "发布前请人工核对"
+                ),
+            }
+    except Exception as error:
+        return {
+            "draft": draft,
+            "warnings": draft.get("warnings", []),
+            "model_assist": {
+                "status": "failed",
+                "phase": "retry",
+                "error": str(error)[:400],
+                "fell_back_to_local": True,
+            },
+        }
+    connection.execute(
+        """
+        UPDATE import_jobs
+        SET draft_data = ?, warnings = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            json.dumps(draft, ensure_ascii=False),
+            json.dumps(draft["warnings"], ensure_ascii=False),
+            job_id,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO revision_log
+            (import_job_id, entity_type, entity_ref, field_name,
+             old_value, new_value, source, model_name, approved)
+        VALUES (?, 'draft', ?, 'answers', ?, ?, 'model-assist', ?, 1)
+        """,
+        (
+            job_id,
+            str(job_id),
+            json.dumps(
+                {str(key): value for key, value in draft.get("answers", {}).items()},
+                ensure_ascii=False,
+            ),
+            json.dumps(draft.get("answer_sources", {}), ensure_ascii=False),
+            request.model.strip(),
+        ),
+    )
+    connection.commit()
+    return {
+        "draft": draft,
+        "warnings": draft["warnings"],
+        "model_assist": draft["model_assist"],
     }
 
 

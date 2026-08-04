@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -204,6 +205,163 @@ class ImportAnswerFlowTests(unittest.TestCase):
         updated = response.json()["draft"]
         self.assertTrue(updated["answers_confirmed"])
         self.assertEqual(updated["answer_sources"]["1"], "人工录入")
+
+    def _minimal_draft(self) -> dict:
+        return {
+            "year": 2020,
+            "detected_format": "docx",
+            "title": "2020年考研英语一真题",
+            "source_file": "paper.docx",
+            "answer_source": "未提供",
+            "answer_status": {
+                "status": "missing",
+                "message": "试卷 Word 未检测到标准答案",
+            },
+            "answers_confirmed": False,
+            "answer_sources": {},
+            "answers": {},
+            "units": [
+                {
+                    "unit_type": "reading",
+                    "subtype": "reading_a",
+                    "title": "阅读 Text 1",
+                    "sequence": 2,
+                    "passage": "Passage",
+                    "shared_data": {},
+                    "questions": [
+                        {
+                            "number": 21,
+                            "stem": "Question",
+                            "options": [
+                                {"key": key, "content": key}
+                                for key in ("A", "B", "C", "D")
+                            ],
+                            "answer": "",
+                            "score": 2.0,
+                        }
+                    ],
+                }
+            ],
+            "warnings": [],
+        }
+
+    def test_upload_model_assist_applies_answers_directly(self) -> None:
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with (
+            patch.object(imports_router, "parse_exam", return_value=draft),
+            patch.object(imports_router, "document_text", return_value="document"),
+            patch.object(
+                imports_router,
+                "run_model_assist",
+                return_value=(
+                    {"answer_map": {"21": "B"}, "issues": ["第21题答案来自答案区"]},
+                    "raw",
+                ),
+            ),
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files={
+                    "file": (
+                        "paper.docx",
+                        io.BytesIO(b"paper"),
+                        "application/octet-stream",
+                    )
+                },
+                data={"use_model_assist": "true"},
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["model_assist"]["status"], "applied")
+        self.assertEqual(body["draft"]["answers"]["21"], "B")
+        self.assertEqual(body["draft"]["answer_sources"]["21"], "模型辅助")
+        self.assertTrue(any("模型辅助" in warning for warning in body["warnings"]))
+
+    def test_upload_model_assist_failure_falls_back_to_local(self) -> None:
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with (
+            patch.object(imports_router, "parse_exam", return_value=draft),
+            patch.object(imports_router, "document_text", return_value="document"),
+            patch.object(
+                imports_router,
+                "run_model_assist",
+                side_effect=ValueError("模型服务暂时不可用"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files={
+                    "file": (
+                        "paper.docx",
+                        io.BytesIO(b"paper"),
+                        "application/octet-stream",
+                    )
+                },
+                data={"use_model_assist": "true"},
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["model_assist"]["status"], "failed")
+        self.assertEqual(body["model_assist"]["fell_back_to_local"], True)
+        self.assertEqual(body["draft"]["answers"], {})
+
+    def test_model_assist_retry_with_other_model(self) -> None:
+        from backend.app.database import connect
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO import_jobs
+                    (filename, stored_path, detected_year, detected_format,
+                     status, draft_data, warnings, parse_context)
+                VALUES (?, ?, ?, ?, 'draft', ?, '[]', ?)
+                """,
+                (
+                    "paper.docx",
+                    "paper.docx",
+                    2020,
+                    "docx",
+                    json.dumps(draft, ensure_ascii=False),
+                    json.dumps({"answer_text": "参考答案 21-25 BACDC"}),
+                ),
+            )
+            job_id = cursor.lastrowid
+            connection.commit()
+        with (
+            patch.object(imports_router, "document_text", return_value="document"),
+            patch.object(
+                imports_router,
+                "run_model_assist",
+                return_value=(
+                    {"answer_map": {"21": "C"}, "issues": []},
+                    "raw",
+                ),
+            ) as mocked,
+        ):
+            response = self.client.post(
+                f"/api/imports/{job_id}/model-assist",
+                json={"profile_id": None, "model": "other-model"},
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["model_assist"]["status"], "applied")
+        self.assertEqual(body["draft"]["answers"]["21"], "C")
+        self.assertEqual(body["draft"]["answer_sources"]["21"], "模型辅助")
+        self.assertEqual(mocked.call_args.kwargs["model"], "other-model")
+        with connect() as connection:
+            saved = json.loads(
+                connection.execute(
+                    "SELECT draft_data FROM import_jobs WHERE id = ?",
+                    (job_id,),
+                ).fetchone()["draft_data"]
+            )
+        self.assertEqual(saved["answers"]["21"], "C")
 
 
 if __name__ == "__main__":

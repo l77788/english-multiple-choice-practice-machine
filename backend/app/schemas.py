@@ -119,6 +119,11 @@ class AiCorrectionRequest(BaseModel):
     instructions: str = ""
 
 
+class ModelAssistRequest(BaseModel):
+    profile_id: int | None = None
+    model: str = ""
+
+
 class VocabularyCreate(BaseModel):
     term: str
     context_sentence: str = ""

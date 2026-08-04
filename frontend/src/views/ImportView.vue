@@ -7,6 +7,13 @@ const jobs = ref<any[]>([])
 const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
 const selectedAnswerFile = ref<File | null>(null)
+const useModelAssist = ref(true)
+const assistDialogOpen = ref(false)
+const assistError = ref('')
+const assistBusy = ref(false)
+const showModelSelector = ref(false)
+const selectorModels = ref<any[]>([])
+const selectedModelKey = ref('')
 const bulkAnswers = ref<Record<string, string>>({})
 const busy = ref(false)
 const error = ref('')
@@ -35,12 +42,53 @@ async function upload() {
   busy.value = true; error.value = ''
   const form = new FormData(); form.append('file', selectedFile.value)
   if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
+  form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
   try {
     current.value = await api('/imports', { method: 'POST', body: form })
+    const assist = current.value.model_assist
+    if (assist?.status === 'failed') {
+      assistError.value = assist.error || '未知错误'
+      assistDialogOpen.value = true
+      showModelSelector.value = false
+    } else if (assist?.status === 'applied') {
+      notice.value = `模型辅助解析完成：应用 ${assist.applied_answers} 道答案，发现 ${assist.issue_count} 个结构问题，请核对后发布`
+    }
     bulkAnswers.value = {}
     await loadJobs()
   } catch (e) { error.value = String(e) }
   finally { busy.value = false }
+}
+
+async function openModelSelector() {
+  assistBusy.value = true
+  try {
+    const result: any = await get('/ai/selector-models')
+    selectorModels.value = result?.models || []
+    selectedModelKey.value = ''
+  } catch (e) { assistError.value = String(e) }
+  finally { assistBusy.value = false }
+}
+
+async function retryAssist() {
+  const [profileId, modelId] = String(selectedModelKey.value).split('|')
+  if (!current.value?.id || !profileId || !modelId) return
+  assistBusy.value = true
+  error.value = ''
+  try {
+    const result: any = await post(`/imports/${current.value.id}/model-assist`, {
+      profile_id: Number(profileId),
+      model: modelId,
+    })
+    if (result.model_assist?.status === 'failed') {
+      assistError.value = result.model_assist.error || '重试失败'
+      return
+    }
+    current.value.draft = result.draft
+    current.value.warnings = result.warnings
+    assistDialogOpen.value = false
+    notice.value = `模型辅助解析完成：应用 ${result.model_assist.applied_answers} 道答案，请核对后发布`
+  } catch (e) { error.value = String(e) }
+  finally { assistBusy.value = false }
 }
 
 async function openJob(id: number) {
@@ -189,7 +237,12 @@ async function exportEsq(includeLabels = false) {
         <div class="card">
           <label class="field"><span>试卷 Word（必选）</span><input type="file" accept=".doc,.docx" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
           <label class="field"><span>答案附件（可选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedAnswerFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <label class="import-assist-toggle">
+            <input v-model="useModelAssist" type="checkbox">
+            <span>上传解析时用模型辅助定位题目与对应答案（默认开启）</span>
+          </label>
           <p class="lead import-file-hint">支持 DOC、DOCX 和文本型 PDF。扫描版或水印干扰严重的 PDF 会回退到人工录入。</p>
+          <p v-if="useModelAssist" class="lead import-file-hint">本地解析完成后会自动调用默认模型核对答案，可能需要 30 秒以上。</p>
           <button class="button" style="width:100%" :disabled="!selectedFile || busy" @click="upload"><FileUp :size="16" />{{ busy ? '正在分析…' : '上传并解析' }}</button>
         </div>
         <div class="card">
@@ -249,6 +302,13 @@ async function exportEsq(includeLabels = false) {
             <FileKey2 :size="18" />
             <div><strong>{{ answerProgress.completed }}/{{ answerProgress.total }} 道答案已填写</strong><span>{{ current.draft.answer_status?.message || '请在下方校对并补全标准答案' }}</span></div>
           </div>
+          <div v-if="current.draft.model_assist?.status === 'applied'" class="import-assist-banner">
+            <Sparkles :size="17" />
+            <div>
+              <strong>模型辅助解析已应用</strong>
+              <span>本次应用 {{ current.draft.model_assist.applied_answers }} 道答案（来源标注“模型辅助”），共识别 {{ current.draft.model_assist.answer_total }} 道；发现 {{ current.draft.model_assist.issue_count }} 个结构问题，见下方警告。{{ current.draft.model_assist.notes || '' }}</span>
+            </div>
+          </div>
           <div v-for="warning in current.draft.warnings" class="warning" :key="warning">{{ warning }}</div>
         </div>
         <div class="card answer-editor">
@@ -298,6 +358,29 @@ async function exportEsq(includeLabels = false) {
         <img src="/assets/quiet-study-empty.webp" alt="" />
         <strong>等待一份新试卷</strong>
         <p>上传或选择一条导入记录后，在这里校对题库。</p>
+      </div>
+    </div>
+    <div v-if="assistDialogOpen" class="review-overlay" role="dialog" aria-modal="true" aria-label="模型辅助不可用">
+      <div class="review-card import-assist-dialog">
+        <h3 style="margin-bottom:10px">模型辅助不可用</h3>
+        <p class="lead" style="font-size:13px;line-height:1.7">本地解析已完成，草稿已保留，可以直接人工审查。原因：{{ assistError }}</p>
+        <div v-if="!showModelSelector" style="display:flex;gap:10px;margin-top:20px;justify-content:center">
+          <button class="button ghost" @click="assistDialogOpen=false">人工审查</button>
+          <button class="button" @click="showModelSelector=true;openModelSelector()">选择其他模型重试</button>
+        </div>
+        <div v-else style="margin-top:16px">
+          <label class="field"><span>选择模型</span>
+            <select v-model="selectedModelKey" :disabled="assistBusy">
+              <option value="" disabled>请选择已配置且启用的模型</option>
+              <option v-for="model in selectorModels" :key="`${model.profile_id}|${model.model_id}`" :value="`${model.profile_id}|${model.model_id}`">{{ model.profile_name }} / {{ model.model_id }}</option>
+            </select>
+          </label>
+          <p v-if="!selectorModels.length && !assistBusy" class="lead" style="font-size:12px;margin-top:8px">没有可用模型，请先在“模型与设置”中配置并启用 API。</p>
+          <div style="display:flex;gap:10px;margin-top:16px;justify-content:center">
+            <button class="button ghost" @click="showModelSelector=false">返回</button>
+            <button class="button" :disabled="!selectedModelKey || assistBusy" @click="retryAssist">{{ assistBusy ? '正在解析…' : '使用该模型重试' }}</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>

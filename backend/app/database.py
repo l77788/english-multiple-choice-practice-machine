@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     status TEXT NOT NULL DEFAULT 'analyzing',
     draft_data TEXT NOT NULL DEFAULT '{}',
     warnings TEXT NOT NULL DEFAULT '[]',
+    parse_context TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -437,6 +438,7 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "wrong_analysis_reports", "unit_ids", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(connection, "wrong_analysis_reports", "input_snapshot", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "wrong_analysis_states", "analyzed_session_id", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "import_jobs", "parse_context", "TEXT NOT NULL DEFAULT '{}'")
     connection.execute(
         """
         UPDATE vocabulary_entries
