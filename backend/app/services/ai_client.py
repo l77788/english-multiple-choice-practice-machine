@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from typing import Any
 
 import httpx
 
 from ..security import unprotect_text
+
+
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+_CHAT_RETRY_ATTEMPTS = 3
 
 
 def _public_profile(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -249,13 +254,44 @@ def chat_completion(
     }
     if response_format:
         payload["response_format"] = response_format
+    def post_with_retry(client: httpx.Client, request_payload: dict[str, Any]) -> httpx.Response:
+        last_response: httpx.Response | None = None
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(_CHAT_RETRY_ATTEMPTS):
+            try:
+                response = client.post(url, headers=headers, json=request_payload)
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as error:
+                last_error = error
+                if attempt == _CHAT_RETRY_ATTEMPTS - 1:
+                    raise ValueError("模型服务暂时不可用，请稍后重试或切换 API 配置") from error
+                time.sleep(2**attempt)
+                continue
+            last_response = response
+            if response.status_code not in _TRANSIENT_STATUS_CODES:
+                return response
+            if attempt < _CHAT_RETRY_ATTEMPTS - 1:
+                retry_after = response.headers.get("Retry-After", "").strip()
+                try:
+                    delay = max(1.0, min(8.0, float(retry_after)))
+                except ValueError:
+                    delay = float(2**attempt)
+                time.sleep(delay)
+                continue
+            raise ValueError(
+                f"模型服务暂时不可用（HTTP {response.status_code}），"
+                "请稍后重试或切换 API 配置"
+            )
+        if last_response is not None:
+            return last_response
+        raise ValueError("模型服务暂时不可用，请稍后重试或切换 API 配置") from last_error
+
     with httpx.Client(timeout=120) as client:
-        response = client.post(url, headers=headers, json=payload)
+        response = post_with_retry(client, payload)
         if response.status_code in {400, 404, 422} and response_format:
             # Some OpenAI-compatible local APIs do not implement
             # response_format. The prompt still requests strict JSON.
             payload.pop("response_format", None)
-            response = client.post(url, headers=headers, json=payload)
+            response = post_with_retry(client, payload)
         response.raise_for_status()
         data = response.json()
     try:

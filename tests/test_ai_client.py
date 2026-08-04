@@ -9,6 +9,7 @@ from backend.app.services.ai_client import (
     _extract_message_content,
     _model_list_urls,
     _parse_model_list,
+    chat_completion,
     list_available_models,
 )
 
@@ -88,6 +89,78 @@ class ModelListTests(unittest.TestCase):
             )
         self.assertEqual(result["source"], "ollama")
         self.assertEqual(result["models"][0]["id"], "qwen3:8b")
+
+
+class ChatCompletionRetryTests(unittest.TestCase):
+    def test_retries_transient_503_and_returns_content(self) -> None:
+        class FakeClient:
+            calls = 0
+
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def post(self, url: str, **kwargs):
+                type(self).calls += 1
+                if type(self).calls < 3:
+                    return httpx.Response(
+                        503,
+                        headers={"Retry-After": "1"},
+                        request=httpx.Request("POST", url),
+                    )
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {"content": "  分析完成  "},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                    request=httpx.Request("POST", url),
+                )
+
+        connection = type(
+            "Connection",
+            (),
+            {
+                "execute": lambda self, *args: type(
+                    "Result",
+                    (),
+                    {
+                        "fetchone": lambda self: {
+                            "id": 1,
+                            "name": "DeepSeek",
+                            "base_url": "https://api.deepseek.com",
+                            "api_key_encrypted": None,
+                            "enabled": 1,
+                            "is_default": 1,
+                            "default_model": "deepseek-chat",
+                            "temperature": 0.2,
+                            "max_tokens": 1200,
+                            "system_prompt": "",
+                        }
+                    },
+                )(),
+            },
+        )()
+        with (
+            patch("backend.app.services.ai_client.httpx.Client", FakeClient),
+            patch("backend.app.services.ai_client.time.sleep"),
+            patch("backend.app.services.ai_client.unprotect_text", return_value="test-key"),
+        ):
+            result = chat_completion(
+                connection,
+                [{"role": "user", "content": "测试"}],
+            )
+        self.assertEqual(result, "分析完成")
+        self.assertEqual(FakeClient.calls, 3)
 
 
 if __name__ == "__main__":
