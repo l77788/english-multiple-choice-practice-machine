@@ -1,0 +1,647 @@
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import threading
+from datetime import datetime, timedelta
+from typing import Any
+
+import httpx
+
+from ..database import connect
+from .ai_client import chat_completion, parse_json_response
+
+
+TERM_RE = re.compile(r"^[A-Za-z][A-Za-z'’-]*(?:\s+[A-Za-z][A-Za-z'’-]*){0,4}$")
+TRANSLATION_BATCH_SIZE = 8
+MAX_TRANSLATIONS_PER_RUN = 100
+_TRANSLATION_LOCK = threading.Lock()
+
+
+def normalize_term(value: str) -> str:
+    value = value.strip().replace("’", "'")
+    value = re.sub(r"\s+", " ", value)
+    return value.lower()
+
+
+def vocabulary_key(value: str) -> str:
+    """Create a conservative local key for common inflected word forms."""
+    normalized = normalize_term(value)
+    if " " in normalized or "'" in normalized or len(normalized) < 5:
+        return normalized
+    if normalized.endswith("ies") and len(normalized) > 5:
+        return normalized[:-3] + "y"
+    if normalized.endswith("ing") and len(normalized) > 6:
+        stem = normalized[:-3]
+        if len(stem) >= 3 and stem[-1] == stem[-2]:
+            stem = stem[:-1]
+        return stem
+    if normalized.endswith("ed") and len(normalized) > 5:
+        stem = normalized[:-2]
+        if stem.endswith("i"):
+            return stem[:-1] + "y"
+        if len(stem) >= 3 and stem[-1] == stem[-2]:
+            stem = stem[:-1]
+        return stem
+    if normalized.endswith("es") and len(normalized) > 5:
+        if normalized.endswith(("ses", "xes", "zes", "ches", "shes")):
+            return normalized[:-2]
+        return normalized[:-1]
+    if normalized.endswith("s") and not normalized.endswith("ss"):
+        return normalized[:-1]
+    return normalized
+
+
+def validate_term(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip())
+    if not TERM_RE.fullmatch(normalized):
+        raise ValueError("请选择一个英文单词或不超过 5 个词的英文短语")
+    return normalized
+
+
+def model_text(value: Any, limit: int) -> str:
+    """Normalize model JSON fields into clean, readable text for the UI."""
+    if isinstance(value, list):
+        value = "、".join(str(item).strip() for item in value if str(item).strip())
+    elif isinstance(value, dict):
+        value = "；".join(
+            f"{key}: {item}" for key, item in value.items() if str(item).strip()
+        )
+    return str(value or "").strip()[:limit]
+
+
+def clean_meaning(value: Any, limit: int = 1000) -> str:
+    """Keep vocabulary meanings concise and remove model-added annotations."""
+    text = model_text(value, limit * 2)
+    text = re.sub(r"^\s*[（(][^（）()]{0,200}[）)]\s*", "", text)
+    text = re.sub(r"^\s*[【\[][^【】\[\]]{0,200}[】\]]\s*", "", text)
+    text = re.sub(
+        r"^\s*(?:当前语境(?:中)?(?:的)?(?:意思|含义|释义)|"
+        r"语境(?:意思|含义|释义)|在(?:本句|此处|这里)(?:中)?(?:意为|表示)?|"
+        r"常见(?:意思|含义|释义))\s*[：:]\s*",
+        "",
+        text,
+    )
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"\s*[（(][^（）()]{0,160}[）)]\s*$", "", text)
+        text = re.sub(r"\s*[【\[][^【】\[\]]{0,160}[】\]]\s*$", "", text)
+    text = re.sub(
+        r"\s*[，,；;]\s*(?:(?:在)?(?:本句|句子|原句|本文|此处|这里)(?:中)?"
+        r"(?:通常|具体)?\s*)?(?:通常|具体)?\s*(?:指|表示|强调|说明).*$",
+        "",
+        text,
+    )
+    return text.strip(" \t\r\n，,；;：:")[:limit]
+
+
+def clean_machine_meanings(connection: sqlite3.Connection) -> int:
+    """Clean existing model translations without touching user-edited entries."""
+    rows = connection.execute(
+        """
+        SELECT id, contextual_meaning, common_meaning
+        FROM vocabulary_entries
+        WHERE user_edited = 0 AND translation_status = 'ready'
+        """
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        contextual = clean_meaning(row["contextual_meaning"])
+        common = clean_meaning(row["common_meaning"])
+        if (
+            contextual == row["contextual_meaning"]
+            and common == row["common_meaning"]
+        ):
+            continue
+        connection.execute(
+            """
+            UPDATE vocabulary_entries
+            SET contextual_meaning = ?, common_meaning = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_edited = 0
+            """,
+            (contextual, common, row["id"]),
+        )
+        changed += 1
+    if changed:
+        connection.commit()
+    return changed
+
+
+def _serialize_entry(connection: sqlite3.Connection, entry_id: int) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM vocabulary_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError("单词不存在")
+    payload = dict(row)
+    payload["is_frequent"] = bool(
+        payload["manually_frequent"] or payload["encounter_count"] >= 2
+    )
+    payload["occurrences"] = [
+        dict(item)
+        for item in connection.execute(
+            """
+            SELECT * FROM vocabulary_occurrences
+            WHERE entry_id = ? ORDER BY id DESC
+            """,
+            (entry_id,),
+        ).fetchall()
+    ]
+    return payload
+
+
+def add_vocabulary(
+    connection: sqlite3.Connection, data: dict[str, Any]
+) -> dict[str, Any]:
+    term = validate_term(data["term"])
+    normalized = vocabulary_key(term)
+    row = connection.execute(
+        """
+        SELECT id, encounter_count, study_status, translation_status, user_edited
+        FROM vocabulary_entries
+        WHERE normalized_term = ?
+        """,
+        (normalized,),
+    ).fetchone()
+    is_new = row is None
+    if is_new:
+        cursor = connection.execute(
+            """
+            INSERT INTO vocabulary_entries
+                (term, normalized_term, translation_status)
+            VALUES (?, ?, 'queued')
+            """,
+            (term, normalized),
+        )
+        entry_id = cursor.lastrowid
+    else:
+        entry_id = row["id"]
+        next_status = (
+            "queued"
+            if row["translation_status"] in {"pending", "failed"} and not row["user_edited"]
+            else row["translation_status"]
+        )
+        connection.execute(
+            """
+            UPDATE vocabulary_entries
+            SET encounter_count = encounter_count + 1,
+                study_status = 'learning',
+                translation_status = ?,
+                translation_error = CASE WHEN ? = 'queued' THEN '' ELSE translation_error END,
+                last_seen_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (next_status, next_status, entry_id),
+        )
+    connection.execute(
+        """
+        INSERT INTO vocabulary_occurrences
+            (entry_id, surface_form, context_sentence, context_before,
+             context_after, unit_id, question_id, year, unit_title, unit_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entry_id,
+            term,
+            data.get("context_sentence", "")[:1500],
+            data.get("context_before", "")[:1000],
+            data.get("context_after", "")[:1000],
+            data.get("unit_id"),
+            data.get("question_id"),
+            data.get("year"),
+            data.get("unit_title", ""),
+            data.get("unit_type", ""),
+        ),
+    )
+    connection.commit()
+    entry = _serialize_entry(connection, entry_id)
+    return {
+        "entry_id": entry_id,
+        "is_new": is_new,
+        "encounter_count": entry["encounter_count"],
+        "is_frequent": entry["is_frequent"],
+        "translation_status": entry["translation_status"],
+    }
+
+
+def _has_translation_model(connection: sqlite3.Connection) -> bool:
+    profile = connection.execute(
+        """
+        SELECT 1
+        FROM ai_profiles
+        WHERE enabled = 1 AND TRIM(default_model) <> ''
+        LIMIT 1
+        """
+    ).fetchone()
+    if profile:
+        return True
+    legacy = connection.execute(
+        """
+        SELECT 1
+        FROM ai_settings
+        WHERE id = 1 AND TRIM(model) <> ''
+        LIMIT 1
+        """
+    ).fetchone()
+    return legacy is not None
+
+
+def queue_vocabulary_translations(
+    connection: sqlite3.Connection,
+    entry_ids: list[int],
+) -> list[int]:
+    unique_ids = list(dict.fromkeys(int(entry_id) for entry_id in entry_ids if int(entry_id) > 0))[:100]
+    if unique_ids:
+        placeholders = ",".join("?" for _ in unique_ids)
+        connection.execute(
+            f"""
+            UPDATE vocabulary_entries
+            SET translation_status = 'queued', translation_error = '',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+              AND user_edited = 0
+              AND translation_status IN ('pending', 'queued', 'failed')
+            """,
+            unique_ids,
+        )
+        rows = connection.execute(
+            f"""
+            SELECT id
+            FROM vocabulary_entries
+            WHERE id IN ({placeholders})
+              AND user_edited = 0
+              AND translation_status = 'queued'
+            ORDER BY id
+            """,
+            unique_ids,
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM vocabulary_entries
+            WHERE user_edited = 0
+              AND translation_status IN ('pending', 'queued')
+            ORDER BY updated_at, id
+            LIMIT ?
+            """,
+            (MAX_TRANSLATIONS_PER_RUN,),
+        ).fetchall()
+    connection.commit()
+    return [row["id"] for row in rows]
+
+
+def _translation_rows(
+    connection: sqlite3.Connection,
+    entry_ids: list[int],
+) -> list[dict[str, Any]]:
+    if not entry_ids:
+        return []
+    placeholders = ",".join("?" for _ in entry_ids)
+    rows = connection.execute(
+        f"""
+        SELECT vocabulary_entries.*,
+               (
+                   SELECT context_sentence
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS context_sentence,
+               (
+                   SELECT context_before
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS context_before,
+               (
+                   SELECT context_after
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS context_after,
+               (
+                   SELECT year
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS source_year,
+               (
+                   SELECT unit_title
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS source_unit_title,
+               (
+                   SELECT unit_type
+                   FROM vocabulary_occurrences
+                   WHERE entry_id = vocabulary_entries.id
+                   ORDER BY id DESC LIMIT 1
+               ) AS source_unit_type
+        FROM vocabulary_entries
+        WHERE id IN ({placeholders})
+          AND user_edited = 0
+          AND translation_status = 'translating'
+        ORDER BY id
+        """,
+        entry_ids,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _mark_translation_failed(
+    connection: sqlite3.Connection,
+    entry_ids: list[int],
+    error: Exception,
+) -> None:
+    if not entry_ids:
+        return
+    placeholders = ",".join("?" for _ in entry_ids)
+    connection.execute(
+        f"""
+        UPDATE vocabulary_entries
+        SET translation_status = 'failed', translation_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ({placeholders})
+          AND user_edited = 0
+          AND translation_status = 'translating'
+        """,
+        (str(error)[:800], *entry_ids),
+    )
+    connection.commit()
+
+
+def _translate_vocabulary_batch(
+    connection: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+) -> None:
+    if not rows:
+        return
+    prompt = """
+你是考研英语语境词汇助手。请批量分析用户标记的单词或短语，并结合各自真题原句判断含义。
+只返回 JSON，不要使用 Markdown。格式必须为：
+{
+  "translations": [
+    {
+      "entryId": 123,
+      "lemma": "词形还原；短语保持原形",
+      "phonetic": "常见英式或美式音标；不确定则留空",
+      "partOfSpeech": "简短词性",
+      "contextualMeaning": "该原句中的准确中文释义",
+      "commonMeaning": "一到三个常见中文释义",
+      "memoryHint": "一句简短记忆提示，不编造词源"
+    }
+  ]
+}
+必须原样返回每个 entryId，不能增加不存在的 ID。释义只填写可直接背诵的简洁中文词义，
+不得加入括号、方括号、语境说明、来源说明、例句解释或“在本文中”“这里指”等标注。
+"""
+    items = [
+        {
+            "entryId": row["id"],
+            "term": row["term"],
+            "sentence": row.get("context_sentence", ""),
+            "before": row.get("context_before", ""),
+            "after": row.get("context_after", ""),
+            "source": {
+                "year": row.get("source_year"),
+                "unitTitle": row.get("source_unit_title"),
+                "unitType": row.get("source_unit_type"),
+            },
+        }
+        for row in rows
+    ]
+    expected_ids = {row["id"] for row in rows}
+    try:
+        content = chat_completion(
+            connection,
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps({"items": items}, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_object"},
+            max_tokens=2400,
+        )
+        parsed = parse_json_response(content)
+        translations = parsed.get("translations") if isinstance(parsed, dict) else None
+        if not isinstance(translations, list):
+            raise ValueError("模型没有返回 translations 数组")
+        received_ids: set[int] = set()
+        for item in translations:
+            if not isinstance(item, dict):
+                continue
+            entry_id = item.get("entryId")
+            if not isinstance(entry_id, int) or entry_id not in expected_ids or entry_id in received_ids:
+                continue
+            contextual = clean_meaning(item.get("contextualMeaning", ""), 1000)
+            if not contextual:
+                continue
+            received_ids.add(entry_id)
+            connection.execute(
+                """
+                UPDATE vocabulary_entries
+                SET lemma = ?, phonetic = ?, part_of_speech = ?,
+                    contextual_meaning = ?, common_meaning = ?, memory_hint = ?,
+                    translation_status = 'ready', translation_error = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_edited = 0
+                  AND translation_status = 'translating'
+                """,
+                (
+                    model_text(item.get("lemma", ""), 120),
+                    model_text(item.get("phonetic", ""), 120),
+                    model_text(item.get("partOfSpeech", ""), 80),
+                    contextual,
+                    clean_meaning(item.get("commonMeaning", ""), 1000),
+                    model_text(item.get("memoryHint", ""), 1000),
+                    entry_id,
+                ),
+            )
+        missing_ids = sorted(expected_ids - received_ids)
+        connection.commit()
+        if missing_ids:
+            raise ValueError(f"模型漏掉了 {len(missing_ids)} 个单词")
+    except (ValueError, LookupError, json.JSONDecodeError, httpx.HTTPError) as error:
+        if len(rows) > 1:
+            middle = len(rows) // 2
+            _translate_vocabulary_batch(connection, rows[:middle])
+            _translate_vocabulary_batch(connection, rows[middle:])
+            return
+        _mark_translation_failed(connection, [rows[0]["id"]], error)
+
+
+def translate_queued_vocabulary() -> dict[str, int]:
+    _TRANSLATION_LOCK.acquire()
+    translated = 0
+    try:
+        with connect() as connection:
+            if not _has_translation_model(connection):
+                return {"translated": 0, "remaining": 0}
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM vocabulary_entries
+                WHERE user_edited = 0
+                  AND translation_status IN ('pending', 'queued')
+                ORDER BY updated_at, id
+                LIMIT ?
+                """,
+                (MAX_TRANSLATIONS_PER_RUN,),
+            ).fetchall()
+            entry_ids = [row["id"] for row in rows]
+            if not entry_ids:
+                connection.commit()
+                return {"translated": 0, "remaining": 0}
+            placeholders = ",".join("?" for _ in entry_ids)
+            connection.execute(
+                f"""
+                UPDATE vocabulary_entries
+                SET translation_status = 'translating',
+                    translation_error = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+                  AND user_edited = 0
+                  AND translation_status IN ('pending', 'queued')
+                """,
+                entry_ids,
+            )
+            connection.commit()
+            claimed_rows = _translation_rows(connection, entry_ids)
+            for index in range(0, len(claimed_rows), TRANSLATION_BATCH_SIZE):
+                batch = claimed_rows[index:index + TRANSLATION_BATCH_SIZE]
+                _translate_vocabulary_batch(connection, batch)
+            translated = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM vocabulary_entries
+                WHERE id IN ({placeholders}) AND translation_status = 'ready'
+                """,
+                entry_ids,
+            ).fetchone()[0]
+            remaining = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM vocabulary_entries
+                WHERE user_edited = 0
+                  AND translation_status IN ('pending', 'queued')
+                """
+            ).fetchone()[0]
+            return {"translated": translated, "remaining": remaining}
+    finally:
+        _TRANSLATION_LOCK.release()
+
+
+def translate_vocabulary_entry(entry_id: int) -> None:
+    with connect() as connection:
+        entry = connection.execute(
+            "SELECT * FROM vocabulary_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        if entry is None or entry["user_edited"]:
+            return
+        occurrence = connection.execute(
+            """
+            SELECT * FROM vocabulary_occurrences
+            WHERE entry_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (entry_id,),
+        ).fetchone()
+        context = dict(occurrence) if occurrence else {}
+        prompt = """
+你是考研英语语境词汇助手。请分析用户标记的单词或短语，必须结合真题原句判断含义。
+只返回 JSON，不要使用 Markdown。字段必须为：
+{
+  "lemma": "词形还原；短语保持原形",
+  "phonetic": "常见英式或美式音标；不确定则留空",
+  "part_of_speech": "简短词性",
+  "contextual_meaning": "该原句中的准确中文释义",
+  "common_meaning": "一到三个常见中文释义",
+  "memory_hint": "一句简短记忆提示，不编造词源"
+}
+释义字段只允许填写可直接背诵的简洁中文词义。不得添加括号、方括号、语境说明、
+来源说明、适用对象、例句解释或“在本文中”“这里指”等标注。
+例如只写“随机地；任意地”，不要写“随机地（指面试者的选择方式）”。
+"""
+        user_payload = {
+            "term": entry["term"],
+            "sentence": context.get("context_sentence", ""),
+            "before": context.get("context_before", ""),
+            "after": context.get("context_after", ""),
+            "source": {
+                "year": context.get("year"),
+                "unit_title": context.get("unit_title"),
+                "unit_type": context.get("unit_type"),
+            },
+        }
+        try:
+            content = chat_completion(
+                connection,
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                response_format={"type": "json_object"},
+            )
+            result = parse_json_response(content)
+            if not isinstance(result, dict) or not result.get("contextual_meaning"):
+                raise ValueError("模型没有返回有效的语境释义")
+            connection.execute(
+                """
+                UPDATE vocabulary_entries
+                SET lemma = ?, phonetic = ?, part_of_speech = ?,
+                    contextual_meaning = ?, common_meaning = ?, memory_hint = ?,
+                    translation_status = 'ready', translation_error = '',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND user_edited = 0
+                """,
+                (
+                    model_text(result.get("lemma", ""), 120),
+                    model_text(result.get("phonetic", ""), 120),
+                    model_text(result.get("part_of_speech", ""), 80),
+                    clean_meaning(result.get("contextual_meaning", ""), 1000),
+                    clean_meaning(result.get("common_meaning", ""), 1000),
+                    model_text(result.get("memory_hint", ""), 1000),
+                    entry_id,
+                ),
+            )
+        except (ValueError, LookupError, json.JSONDecodeError, httpx.HTTPError) as error:
+            connection.execute(
+                """
+                UPDATE vocabulary_entries
+                SET translation_status = 'failed', translation_error = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (str(error)[:800], entry_id),
+            )
+        connection.commit()
+
+
+def review_entry(
+    connection: sqlite3.Connection, entry_id: int, rating: str
+) -> dict[str, Any]:
+    now = datetime.now()
+    delays = {"again": 1, "hard": 3, "mastered": 7}
+    next_review = now + timedelta(days=delays[rating])
+    status = "mastered" if rating == "mastered" else "learning"
+    connection.execute(
+        """
+        UPDATE vocabulary_entries
+        SET study_status = ?, last_reviewed_at = ?, next_review_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, now.isoformat(timespec="seconds"), next_review.isoformat(timespec="seconds"), entry_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO vocabulary_reviews (entry_id, rating, next_review_at)
+        VALUES (?, ?, ?)
+        """,
+        (entry_id, rating, next_review.isoformat(timespec="seconds")),
+    )
+    connection.commit()
+    return _serialize_entry(connection, entry_id)
