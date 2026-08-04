@@ -279,6 +279,34 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertEqual(body["draft"]["answer_sources"]["21"], "模型辅助")
         self.assertTrue(any("模型辅助" in warning for warning in body["warnings"]))
 
+    def test_model_assist_counts_matching_local_answer_as_verified(self) -> None:
+        from backend.app.services.import_assist import apply_model_assist
+
+        draft = self._minimal_draft()
+        draft["answers"] = {"21": "B"}
+        draft["answer_sources"] = {"21": "answers.pdf"}
+        draft["units"][0]["questions"][0]["answer"] = "B"
+
+        result = apply_model_assist(
+            draft,
+            {"answer_map": {"21": "B"}, "number_map": {}, "issues": []},
+        )
+
+        self.assertEqual(result["model_assist"]["applied_answers"], 1)
+        self.assertEqual(result["answer_sources"]["21"], "模型辅助")
+
+    def test_option_parser_keeps_word_final_letters(self) -> None:
+        from backend.app.services.docx_parser import _split_option_text
+
+        self.assertEqual(
+            _split_option_text("[C] have a little common sense. [D] another word."),
+            [("C", "have a little common sense."), ("D", "another word.")],
+        )
+        self.assertEqual(
+            _split_option_text("[C] first [D] respond independently to a changing world."),
+            [("C", "first"), ("D", "respond independently to a changing world.")],
+        )
+
     def test_upload_model_assist_failure_falls_back_to_local(self) -> None:
         from backend.app.routers import imports as imports_router
 
@@ -434,6 +462,72 @@ class ImportAnswerFlowTests(unittest.TestCase):
         question = body["draft"]["units"][0]["questions"][0]
         self.assertEqual(question["stem"], "Question")
         self.assertEqual(question["options"][0]["content"], "A")
+
+    def test_model_assist_uses_full_paper_output_budget(self) -> None:
+        from backend.app.services import import_assist
+
+        with patch.object(
+            import_assist,
+            "chat_completion",
+            return_value='{"answer_map": {}, "number_map": {}, "issues": []}',
+        ) as mocked:
+            result, _ = import_assist.run_model_assist(
+                object(),
+                self._minimal_draft(),
+                "document",
+            )
+
+        self.assertEqual(result["answer_map"], {})
+        self.assertEqual(mocked.call_args.kwargs["max_tokens"], 8000)
+
+    def test_model_assist_applies_safe_number_map_and_moves_answers(self) -> None:
+        from backend.app.services.import_assist import apply_model_assist
+
+        draft = self._minimal_draft()
+        first = draft["units"][0]["questions"][0]
+        first["answer"] = "A"
+        second = json.loads(json.dumps(first))
+        second["number"] = 22
+        second["answer"] = "B"
+        draft["units"][0]["questions"].append(second)
+        draft["answers"] = {"21": "A", "22": "B"}
+        draft["answer_sources"] = {"21": "local", "22": "local"}
+
+        result = apply_model_assist(
+            draft,
+            {
+                "answer_map": {},
+                "number_map": {"21": "22", "22": "21"},
+                "issues": [],
+            },
+        )
+
+        questions = result["units"][0]["questions"]
+        self.assertEqual([question["number"] for question in questions], [22, 21])
+        self.assertEqual(result["answers"], {"22": "A", "21": "B"})
+        self.assertEqual(result["model_assist"]["applied_number_fixes"], 2)
+
+    def test_model_assist_rejects_duplicate_number_map(self) -> None:
+        from backend.app.services.import_assist import apply_model_assist
+
+        draft = self._minimal_draft()
+        second = json.loads(json.dumps(draft["units"][0]["questions"][0]))
+        second["number"] = 22
+        draft["units"][0]["questions"].append(second)
+        result = apply_model_assist(
+            draft,
+            {
+                "answer_map": {},
+                "number_map": {"21": "22"},
+                "issues": [],
+            },
+        )
+
+        self.assertEqual(result["units"][0]["questions"][0]["number"], 21)
+        self.assertEqual(result["model_assist"]["applied_number_fixes"], 0)
+        self.assertTrue(
+            any("重复题号" in warning for warning in result["warnings"])
+        )
 
 
 if __name__ == "__main__":

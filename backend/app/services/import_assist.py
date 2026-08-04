@@ -18,6 +18,7 @@ from .docx_parser import (
 
 MAX_DOCUMENT_CHARS = 60000
 MAX_ANSWER_CHARS = 20000
+MODEL_ASSIST_MAX_TOKENS = 8000
 
 
 def extract_attachment_text(path: Path) -> str:
@@ -115,6 +116,7 @@ def run_model_assist(
 {"answer_map": {"1": "B"}, "number_map": {"12": "13"},
  "question_fixes": [{"number": 5, "stem": "...", "options": [{"key": "A", "content": "..."}]}],
  "issues": ["第5题选项疑似属于第6题"], "notes": "简要说明"}
+answer_map 的题号使用材料核对后的最终题号；number_map 只描述草稿旧题号到最终题号的变化。
 answer_map 的值只能是单个字母 A-H；没有把握的题不要填。不要输出逐题解析，不要翻译文章。
 """.strip()
     payload = {
@@ -131,7 +133,11 @@ answer_map 的值只能是单个字母 A-H；没有把握的题不要填。不�
         response_format={"type": "json_object"},
         profile_id=profile_id,
         model=model,
-        max_tokens=2800,
+        # Reasoning models may spend most of a small budget inspecting a full
+        # Word export.  2800 tokens was not enough for the 2002 paper to emit
+        # any JSON; 8000 keeps the request bounded while allowing the complete
+        # answer map and optional structure fixes to be returned.
+        max_tokens=MODEL_ASSIST_MAX_TOKENS,
     )
     result = parse_json_response(raw)
     if not isinstance(result, dict):
@@ -147,6 +153,72 @@ def apply_model_assist(
     correct_structure: bool = False,
 ) -> dict[str, Any]:
     """Apply a validated model result directly into the draft."""
+    issues = result.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    issue_texts = [str(item).strip()[:160] for item in issues if str(item).strip()]
+
+    applied_number_fixes = 0
+    normalized_number_map: dict[str, str] = {}
+    number_map = result.get("number_map")
+    if isinstance(number_map, dict) and number_map:
+        question_rows = [
+            (unit, question)
+            for unit in draft.get("units", [])
+            for question in unit.get("questions", [])
+        ]
+        questions = [question for _, question in question_rows]
+        original_numbers = [str(question.get("number", "")).strip() for question in questions]
+        for old_number, new_number in number_map.items():
+            old = str(old_number).strip()
+            new = str(new_number).strip()
+            matching_row = next(
+                (
+                    (unit, question)
+                    for unit, question in question_rows
+                    if str(question.get("number", "")).strip() == old
+                ),
+                None,
+            )
+            if matching_row is None or not old.isdigit() or not new.isdigit():
+                continue
+            unit, _ = matching_row
+            normalized_new = int(new)
+            unit_type = str(unit.get("unit_type", ""))
+            allowed = (
+                range(1, 21)
+                if unit_type == "cloze"
+                else range(21, 41)
+                if unit_type == "reading"
+                else range(41, 46)
+                if unit_type == "part_b"
+                else range(1, 46)
+            )
+            if normalized_new in allowed:
+                normalized_number_map[old] = str(normalized_new)
+        remapped_numbers = [
+            normalized_number_map.get(number, number) for number in original_numbers
+        ]
+        if normalized_number_map and len(set(remapped_numbers)) == len(remapped_numbers):
+            for question, old_number, new_number in zip(
+                questions, original_numbers, remapped_numbers
+            ):
+                if old_number != new_number:
+                    question["number"] = int(new_number)
+                    applied_number_fixes += 1
+            old_answers = dict(draft.setdefault("answers", {}))
+            old_sources = dict(draft.setdefault("answer_sources", {}))
+            draft["answers"] = {
+                normalized_number_map.get(str(number), str(number)): answer
+                for number, answer in old_answers.items()
+            }
+            draft["answer_sources"] = {
+                normalized_number_map.get(str(number), str(number)): source
+                for number, source in old_sources.items()
+            }
+        elif normalized_number_map:
+            issue_texts.append("题号修正会产生重复题号，已拒绝自动应用，请人工核对")
+
     answers = draft.setdefault("answers", {})
     answer_sources = draft.setdefault("answer_sources", {})
     expected_numbers = {str(number) for number in objective_question_numbers(draft)}
@@ -154,16 +226,17 @@ def apply_model_assist(
     answer_map = result.get("answer_map")
     if isinstance(answer_map, dict):
         for number, letter in answer_map.items():
+            # answer_map and question_fixes refer to the corrected/material
+            # question numbers; number_map has already renamed the draft.
             normalized_number = str(number).strip()
             normalized_letter = str(letter or "").strip().upper()
             if normalized_number not in expected_numbers:
                 continue
             if len(normalized_letter) != 1 or normalized_letter not in "ABCDEFGH":
                 continue
-            if answers.get(normalized_number) != normalized_letter:
-                answers[normalized_number] = normalized_letter
-                answer_sources[normalized_number] = "模型辅助"
-                applied_answers += 1
+            answers[normalized_number] = normalized_letter
+            answer_sources[normalized_number] = "模型辅助"
+            applied_answers += 1
 
     applied_fixes = 0
     question_fixes = result.get("question_fixes")
@@ -203,7 +276,12 @@ def apply_model_assist(
                         valid = False
                         break
                     cleaned.append({"key": key, "content": content[:1000]})
-                if valid:
+                old_keys = [
+                    str(item.get("key", "")).strip().upper()
+                    for item in target["options"]
+                ]
+                new_keys = [item["key"] for item in cleaned]
+                if valid and new_keys == old_keys and len(set(new_keys)) == len(new_keys):
                     old_contents = [str(item.get("content", "")) for item in target["options"]]
                     new_contents = [item["content"] for item in cleaned]
                     if old_contents != new_contents:
@@ -212,16 +290,13 @@ def apply_model_assist(
             if changed:
                 applied_fixes += 1
 
-    issues = result.get("issues")
-    if not isinstance(issues, list):
-        issues = []
-    issue_texts = [str(item).strip()[:160] for item in issues if str(item).strip()]
     issue_texts = list(dict.fromkeys(issue_texts))[:20]
 
     draft["model_assist"] = {
         "status": "applied",
         "applied_answers": applied_answers,
         "applied_fixes": applied_fixes,
+        "applied_number_fixes": applied_number_fixes,
         "answer_total": sum(1 for value in answers.values() if value),
         "issue_count": len(issue_texts),
         "issues": issue_texts,

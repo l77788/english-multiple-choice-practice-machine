@@ -18,7 +18,11 @@ from .passage_cleanup import repair_inline_blank_paragraph_breaks
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 PAGE_FOOTER_RE = re.compile(r"英语.*试题.*共\s*1?\s*5\s*页", re.I)
 OPTION_MARK_RE = re.compile(
-    r"(?:\[|\(|（|【|(?<![A-Z]))\s*([A-Ha-h])\s*(?:\]|\)|）|】|[\.．、,])\s*",
+    # A bare ``A.``/``B)`` option marker must not be recognized inside a
+    # lowercase word.  The previous ``(?<![A-Z])`` guard treated the final
+    # ``e.`` in ``sense.`` and ``d.`` in ``world.`` as option markers, which
+    # silently removed the final character from 2002 reading options.
+    r"(?:\[|\(|（|【|(?<![A-Za-z]))\s*([A-Ha-h])\s*(?:\]|\)|）|】|[\.．、,])\s*",
 )
 QUESTION_NUMBER_RE = re.compile(r"^\s*([1-5]?\d)\s*[\.．、)]\s*(.+)$", re.S)
 TEXT_MARK_RE = re.compile(r"^\s*Text\s*([1-4lI])\s*$", re.I)

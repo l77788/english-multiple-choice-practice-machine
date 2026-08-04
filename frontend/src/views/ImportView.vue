@@ -313,7 +313,7 @@ async function exportEsq(includeLabels = false) {
             <Sparkles :size="17" />
             <div>
               <strong>模型辅助解析已应用</strong>
-              <span>本次应用 {{ current.draft.model_assist.applied_answers }} 道答案（来源标注“模型辅助”）<template v-if="current.draft.model_assist.applied_fixes">，直接修正 {{ current.draft.model_assist.applied_fixes }} 处题干/选项</template>，共识别 {{ current.draft.model_assist.answer_total }} 道；发现 {{ current.draft.model_assist.issue_count }} 个结构问题，见下方警告。{{ current.draft.model_assist.notes || '' }}</span>
+              <span>本次核对 {{ current.draft.model_assist.applied_answers }} 道答案（来源标注“模型辅助”）<template v-if="current.draft.model_assist.applied_number_fixes">，修正 {{ current.draft.model_assist.applied_number_fixes }} 个题号</template><template v-if="current.draft.model_assist.applied_fixes">，直接修正 {{ current.draft.model_assist.applied_fixes }} 处题干/选项</template>，共识别 {{ current.draft.model_assist.answer_total }} 道；发现 {{ current.draft.model_assist.issue_count }} 个结构问题，见下方警告。{{ current.draft.model_assist.notes || '' }}</span>
             </div>
           </div>
           <div v-for="warning in current.draft.warnings" class="warning" :key="warning">{{ warning }}</div>
