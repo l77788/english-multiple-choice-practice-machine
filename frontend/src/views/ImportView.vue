@@ -23,6 +23,7 @@ const error = ref('')
 const notice = ref('')
 const aiInstructions = ref('')
 const aiSuggestion = ref<any>(null)
+const expandedEditorUnits = ref<Record<string, boolean>>({})
 const esqJobs = ref<any[]>([])
 const esqCurrent = ref<any>(null)
 const selectedEsqFile = ref<File | null>(null)
@@ -137,6 +138,43 @@ function setAnswer(question: any, answer: string) {
   question.answer = answer
   if (answer) current.value.draft.answer_sources[String(question.number)] = '人工录入'
   else delete current.value.draft.answer_sources[String(question.number)]
+}
+
+function setDraftField(field: string, value: string) {
+  if (!current.value?.draft) return
+  current.value.draft[field] = field === 'year' ? (value ? Number(value) : null) : value
+}
+
+function setUnitField(unit: any, field: string, value: string) {
+  if (field === 'directions') {
+    unit.shared_data ||= {}
+    unit.shared_data.directions = value
+    return
+  }
+  unit[field] = value
+}
+
+function toggleEditorUnit(unit: any) {
+  const key = String(unit.sequence || unit.title)
+  expandedEditorUnits.value[key] = !expandedEditorUnits.value[key]
+}
+
+function isEditorUnitOpen(unit: any) {
+  const key = String(unit.sequence || unit.title)
+  return expandedEditorUnits.value[key] ?? false
+}
+
+function updateOption(question: any, option: any, value: string) {
+  option.content = value
+  if (current.value?.draft?.answers?.[question.number] === option.key) {
+    question.answer = option.key
+  }
+}
+
+function updateCandidate(unit: any, key: string, value: string) {
+  unit.shared_data ||= {}
+  unit.shared_data.candidates ||= {}
+  unit.shared_data.candidates[key] = value
 }
 
 function applyBulkAnswers(unit: any) {
@@ -388,11 +426,49 @@ async function exportEsq(includeLabels = false) {
             <button class="button" @click="acceptAi">接受建议并保存草稿</button>
           </div>
         </div>
-        <div class="card">
-          <h3>结构化草稿</h3><p class="lead" style="margin-bottom:15px">第一版提供完整 JSON 编辑，后续会换成逐字段可视化校对器。</p>
-          <textarea v-model="current.draftText" v-if="false"></textarea>
-          <textarea style="width:100%;min-height:600px;font:13px Consolas;line-height:1.55;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--surface-solid);color:var(--ink)" :value="JSON.stringify(current.draft,null,2)" @change="current.draft=JSON.parse(($event.target as HTMLTextAreaElement).value)"></textarea>
-          <button class="button" style="margin-top:14px" @click="saveDraft">保存人工校正</button>
+        <div class="card visual-draft-editor">
+          <div class="visual-editor-head">
+            <div>
+              <span class="eyebrow">FIELD-BY-FIELD REVIEW</span>
+              <h3>结构化草稿校对器</h3>
+              <p class="lead">按试卷、篇目、题目和选项逐项检查。修改会直接写入当前草稿，最后点击“保存人工校正”。</p>
+            </div>
+            <button class="button" :disabled="busy" @click="saveDraft"><Check :size="16" />保存校正</button>
+          </div>
+          <div class="draft-field-grid">
+            <label class="field"><span>年份</span><input :value="current.draft.year || ''" @input="setDraftField('year', ($event.target as HTMLInputElement).value)" /></label>
+            <label class="field"><span>科目</span><input :value="current.draft.subject || ''" @input="setDraftField('subject', ($event.target as HTMLInputElement).value)" /></label>
+            <label class="field draft-field-wide"><span>试卷标题</span><input :value="current.draft.title || ''" @input="setDraftField('title', ($event.target as HTMLInputElement).value)" /></label>
+          </div>
+          <div v-for="unit in answerUnits" :key="`editor-${unit.sequence}`" class="draft-unit">
+            <button type="button" class="draft-unit-head" @click="toggleEditorUnit(unit)">
+              <span><strong>{{ unit.title }}</strong><small>{{ unit.unit_type }} · {{ unit.questions.length }} 题</small></span>
+              <span class="draft-unit-progress">{{ unit.questions.filter((question:any) => question.stem || question.options?.some((option:any) => option.content)).length }}/{{ unit.questions.length }} 已检查</span>
+            </button>
+            <div v-if="isEditorUnitOpen(unit)" class="draft-unit-body">
+              <label class="field"><span>篇目说明 / 方向</span><textarea :value="unit.shared_data?.directions || ''" @input="setUnitField(unit, 'directions', ($event.target as HTMLTextAreaElement).value)" rows="2" placeholder="可选：填写题型说明或答题要求"></textarea></label>
+              <label class="field" v-if="unit.unit_type !== 'part_b'"><span>文章正文</span><textarea :value="unit.passage || ''" @input="setUnitField(unit, 'passage', ($event.target as HTMLTextAreaElement).value)" rows="6" placeholder="检查段落、空位和断行"></textarea></label>
+              <div v-if="unit.unit_type === 'part_b'" class="draft-candidates">
+                <span class="field-label">Part B 候选项</span>
+                <label v-for="(candidate, key) in (unit.shared_data?.candidates || {})" :key="`candidate-${unit.sequence}-${key}`" class="field"><span>{{ key }} 候选段落</span><textarea :value="candidate" rows="3" @input="updateCandidate(unit, String(key), ($event.target as HTMLTextAreaElement).value)"></textarea></label>
+              </div>
+              <div v-for="question in unit.questions" :key="`editor-question-${question.number}`" class="draft-question">
+                <div class="draft-question-head"><span class="draft-number">{{ question.number }}</span><span class="draft-answer-source">答案来源：{{ current.draft.answer_sources?.[question.number] || '未设置' }}</span></div>
+                <label class="field"><span>题干</span><textarea v-model="question.stem" rows="2" placeholder="检查题干和题号归属"></textarea></label>
+                <div class="draft-options-grid">
+                  <label v-for="option in question.options" :key="`${question.number}-${option.key}`" class="field draft-option-field">
+                    <span>{{ option.key }} 选项</span><textarea :value="option.content" rows="2" @input="updateOption(question, option, ($event.target as HTMLTextAreaElement).value)"></textarea>
+                  </label>
+                </div>
+                <label class="field draft-answer-field"><span>标准答案</span><select :value="current.draft.answers?.[question.number] || ''" @change="setAnswer(question, ($event.target as HTMLSelectElement).value)"><option value="">未设置</option><option v-for="option in question.options" :key="`answer-${question.number}-${option.key}`" :value="option.key">{{ option.key }}</option></select></label>
+              </div>
+            </div>
+          </div>
+          <details class="advanced-json-editor">
+            <summary>高级 JSON 入口（仅用于批量修复）</summary>
+            <p class="lead">普通校对建议使用上方字段编辑器；JSON 入口保留给熟悉 ESQ 结构的用户。</p>
+            <textarea :value="JSON.stringify(current.draft,null,2)" @change="current.draft=JSON.parse(($event.target as HTMLTextAreaElement).value)"></textarea>
+          </details>
         </div>
       </section>
       <div v-else class="card empty illustrated-empty">
