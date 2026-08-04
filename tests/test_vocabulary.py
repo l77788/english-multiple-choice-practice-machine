@@ -65,8 +65,8 @@ class VocabularyTests(unittest.TestCase):
                 "context_sentence": "The evidence supports the conclusion.",
             },
         )
-        self.assertEqual(first["translation_status"], "queued")
-        self.assertEqual(second["translation_status"], "queued")
+        self.assertEqual(first["translation_status"], "pending")
+        self.assertEqual(second["translation_status"], "pending")
         self.connection.execute(
             """
             UPDATE ai_profiles
@@ -97,6 +97,12 @@ class VocabularyTests(unittest.TestCase):
                 },
             ]
         }
+        from backend.app.services.vocabulary import queue_vocabulary_translations
+
+        queue_vocabulary_translations(
+            self.connection,
+            [first["entry_id"], second["entry_id"]],
+        )
         with (
             patch(
                 "backend.app.services.vocabulary.connect",
@@ -178,7 +184,10 @@ class VocabularyTests(unittest.TestCase):
     def test_batch_translation_stores_discrimination_fields(self) -> None:
         import json
 
-        from backend.app.services.vocabulary import _serialize_entry
+        from backend.app.services.vocabulary import (
+            _serialize_entry,
+            queue_vocabulary_translations,
+        )
 
         first = add_vocabulary(
             self.connection,
@@ -227,6 +236,10 @@ class VocabularyTests(unittest.TestCase):
                 },
             ]
         }
+        queue_vocabulary_translations(
+            self.connection,
+            [first["entry_id"], second["entry_id"]],
+        )
         with (
             patch(
                 "backend.app.services.vocabulary.connect",
@@ -299,6 +312,47 @@ class VocabularyTests(unittest.TestCase):
             [{"word": "a", "note": "x"}, {"word": "b", "note": "y"}, {"word": "c", "note": "z"}],
         )
         self.assertEqual(_discrimination_list([{"word": "", "note": "x"}]), [])
+
+    def test_practice_exit_queues_all_pending_words(self) -> None:
+        from backend.app.services.vocabulary import queue_vocabulary_translations
+
+        first = add_vocabulary(
+            self.connection,
+            {"term": "claims", "context_sentence": "The author claims it."},
+        )
+        second = add_vocabulary(
+            self.connection,
+            {"term": "evidence", "context_sentence": "Evidence supports it."},
+        )
+        third = add_vocabulary(
+            self.connection,
+            {"term": "policy", "context_sentence": "The policy changed."},
+        )
+        self.assertEqual(first["translation_status"], "pending")
+
+        queued = queue_vocabulary_translations(
+            self.connection,
+            [first["entry_id"]],
+        )
+        self.assertEqual(queued, [first["entry_id"]])
+        statuses = dict(
+            self.connection.execute(
+                "SELECT id, translation_status FROM vocabulary_entries"
+            ).fetchall()
+        )
+        self.assertEqual(statuses[first["entry_id"]], "queued")
+        self.assertEqual(statuses[second["entry_id"]], "pending")
+        self.assertEqual(statuses[third["entry_id"]], "pending")
+
+        all_queued = queue_vocabulary_translations(
+            self.connection,
+            [],
+            include_all_pending=True,
+        )
+        self.assertEqual(
+            set(all_queued),
+            {first["entry_id"], second["entry_id"], third["entry_id"]},
+        )
 
 
 def json_dump(value: object) -> str:

@@ -131,7 +131,11 @@ def create_translation_run(
     background_tasks: BackgroundTasks,
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
-    queued_ids = queue_vocabulary_translations(connection, request.entry_ids)
+    queued_ids = queue_vocabulary_translations(
+        connection,
+        request.entry_ids,
+        include_all_pending=request.trigger == "practice_exit",
+    )
     if queued_ids:
         background_tasks.add_task(translate_queued_vocabulary)
     return {

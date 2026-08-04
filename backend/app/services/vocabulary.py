@@ -287,7 +287,7 @@ def add_vocabulary(
             """
             INSERT INTO vocabulary_entries
                 (term, normalized_term, translation_status)
-            VALUES (?, ?, 'queued')
+            VALUES (?, ?, 'pending')
             """,
             (term, normalized),
         )
@@ -295,7 +295,7 @@ def add_vocabulary(
     else:
         entry_id = row["id"]
         next_status = (
-            "queued"
+            "pending"
             if row["translation_status"] in {"pending", "failed"} and not row["user_edited"]
             else row["translation_status"]
         )
@@ -305,7 +305,7 @@ def add_vocabulary(
             SET encounter_count = encounter_count + 1,
                 study_status = 'learning',
                 translation_status = ?,
-                translation_error = CASE WHEN ? = 'queued' THEN '' ELSE translation_error END,
+                translation_error = CASE WHEN ? = 'pending' THEN '' ELSE translation_error END,
                 last_seen_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
@@ -368,8 +368,25 @@ def _has_translation_model(connection: sqlite3.Connection) -> bool:
 def queue_vocabulary_translations(
     connection: sqlite3.Connection,
     entry_ids: list[int],
+    *,
+    include_all_pending: bool = False,
 ) -> list[int]:
     unique_ids = list(dict.fromkeys(int(entry_id) for entry_id in entry_ids if int(entry_id) > 0))[:100]
+    if include_all_pending:
+        pending_rows = connection.execute(
+            """
+            SELECT id FROM vocabulary_entries
+            WHERE user_edited = 0 AND translation_status IN ('pending', 'queued')
+            ORDER BY updated_at, id
+            LIMIT ?
+            """,
+            (MAX_TRANSLATIONS_PER_RUN,),
+        ).fetchall()
+        unique_ids = list(
+            dict.fromkeys(
+                [*unique_ids, *(int(row["id"]) for row in pending_rows)]
+            )
+        )[:100]
     if unique_ids:
         placeholders = ",".join("?" for _ in unique_ids)
         connection.execute(
@@ -610,7 +627,7 @@ def translate_queued_vocabulary() -> dict[str, int]:
                 SELECT id
                 FROM vocabulary_entries
                 WHERE user_edited = 0
-                  AND translation_status IN ('pending', 'queued')
+                  AND translation_status = 'queued'
                 ORDER BY updated_at, id
                 LIMIT ?
                 """,
@@ -629,7 +646,7 @@ def translate_queued_vocabulary() -> dict[str, int]:
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id IN ({placeholders})
                   AND user_edited = 0
-                  AND translation_status IN ('pending', 'queued')
+                  AND translation_status = 'queued'
                 """,
                 entry_ids,
             )
@@ -651,7 +668,7 @@ def translate_queued_vocabulary() -> dict[str, int]:
                 SELECT COUNT(*)
                 FROM vocabulary_entries
                 WHERE user_edited = 0
-                  AND translation_status IN ('pending', 'queued')
+                  AND translation_status = 'queued'
                 """
             ).fetchone()[0]
             return {"translated": translated, "remaining": remaining}
