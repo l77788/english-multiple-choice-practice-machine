@@ -7,15 +7,10 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  LibraryBig,
-  Lock,
   LoaderCircle,
-  Pause,
-  Play,
   PlugZap,
   RefreshCw,
   Save,
-  Search,
   Server,
   Trash2,
 } from 'lucide-vue-next'
@@ -46,36 +41,6 @@ type AiProfile = {
   models: AiModel[]
 }
 
-type LabelStatus = {
-  year: number | null
-  years: number[]
-  total: number
-  labeled: number
-  locked: number
-  review_pending: number
-  remaining: number
-  percentage: number
-}
-
-type QuestionLabel = {
-  question_id: number
-  number: number
-  year: number
-  unit_title: string
-  primary_skill: string
-  secondary_skills: string[]
-  trap_types: string[]
-  attention_points: string[]
-  vocabulary_demand: 'low' | 'medium' | 'high'
-  context_dependency: 'low' | 'medium' | 'high'
-  grammar_dependency: 'low' | 'medium' | 'high'
-  confidence: number
-  locked: boolean
-  user_edited: boolean
-  model_name: string
-  updated_at: string
-}
-
 const profiles = ref<AiProfile[]>([])
 const expanded = ref<number[]>([])
 const busy = reactive<Record<string, boolean>>({})
@@ -83,16 +48,6 @@ const notices = reactive<Record<number, string>>({})
 const message = ref('')
 const error = ref('')
 const creating = ref(false)
-const labelStatus = ref<LabelStatus | null>(null)
-const labelYear = ref<number | ''>('')
-const labeling = ref(false)
-const labelMessage = ref('')
-const overwriteUnlocked = ref(false)
-const labelRunId = ref('')
-const labelManagerOpen = ref(false)
-const labelRows = ref<QuestionLabel[]>([])
-const labelSearch = ref('')
-const editingLabel = ref<QuestionLabel | null>(null)
 
 function blankProfile(): AiProfile {
   return {
@@ -151,108 +106,6 @@ async function load() {
     error.value = ''
   } catch (cause) {
     error.value = String(cause)
-  }
-}
-
-async function loadLabelStatus() {
-  try {
-    const query = labelYear.value === '' ? '' : `?year=${labelYear.value}`
-    labelStatus.value = await get<LabelStatus>(`/ai/question-labels/status${query}`)
-  } catch (cause) {
-    labelMessage.value = `读取标注进度失败：${String(cause)}`
-  }
-}
-
-async function runLabeling() {
-  if (labeling.value) return
-  if (!window.confirm('题库智能标注会调用当前默认 API 并产生 Token 消耗。确定开始吗？')) return
-  if (!labelRunId.value) {
-    labelRunId.value = crypto.randomUUID()
-  }
-  labeling.value = true
-  labelMessage.value = '正在读取下一篇题目…'
-  try {
-    while (labeling.value) {
-      const result = await post<any>('/ai/question-labels/next', {
-        year: labelYear.value === '' ? null : labelYear.value,
-        overwrite_unlocked: overwriteUnlocked.value,
-        run_id: labelRunId.value,
-      })
-      labelRunId.value = result.run_id || labelRunId.value
-      labelStatus.value = result
-      if (result.done) {
-        labelMessage.value = '所选范围已经全部完成标注'
-        labeling.value = false
-        labelRunId.value = ''
-        break
-      }
-      labelMessage.value = `已完成：${result.unit_title}，本篇标注 ${result.processed} 道`
-      await new Promise(resolve => window.setTimeout(resolve, 120))
-    }
-  } catch (cause) {
-    labelMessage.value = String(cause)
-    labeling.value = false
-  }
-}
-
-function pauseLabeling() {
-  labeling.value = false
-  labelMessage.value = '已暂停。再次开始时会从下一篇未完成材料继续。'
-}
-
-async function loadQuestionLabels() {
-  const query = new URLSearchParams()
-  if (labelYear.value !== '') query.set('year', String(labelYear.value))
-  if (labelSearch.value.trim()) query.set('search', labelSearch.value.trim())
-  query.set('limit', '120')
-  try {
-    labelRows.value = await get<QuestionLabel[]>(`/ai/question-labels?${query}`)
-    labelManagerOpen.value = true
-  } catch (cause) {
-    labelMessage.value = String(cause)
-  }
-}
-
-function editLabel(row: QuestionLabel) {
-  editingLabel.value = {
-    ...row,
-    // Any manual correction is protected by default. The user can explicitly
-    // uncheck this if they want later batch labeling to replace it.
-    locked: true,
-    secondary_skills: [...(row.secondary_skills || [])],
-    trap_types: [...(row.trap_types || [])],
-    attention_points: [...(row.attention_points || [])],
-  }
-}
-
-function splitTags(value: string) {
-  return value.split(/[，,；;\n]/).map(item => item.trim()).filter(Boolean)
-}
-
-async function saveQuestionLabel() {
-  const row = editingLabel.value
-  if (!row) return
-  const key = busyKey('label', row.question_id)
-  busy[key] = true
-  try {
-    await put(`/ai/question-labels/${row.question_id}`, {
-      primary_skill: row.primary_skill,
-      secondary_skills: row.secondary_skills,
-      trap_types: row.trap_types,
-      attention_points: row.attention_points,
-      vocabulary_demand: row.vocabulary_demand,
-      context_dependency: row.context_dependency,
-      grammar_dependency: row.grammar_dependency,
-      confidence: row.confidence,
-      locked: row.locked,
-    })
-    labelMessage.value = `已保存并${row.locked ? '锁定' : '解除锁定'} ${row.year} 年第 ${row.number} 题标签`
-    editingLabel.value = null
-    await Promise.all([loadQuestionLabels(), loadLabelStatus()])
-  } catch (cause) {
-    labelMessage.value = String(cause)
-  } finally {
-    busy[key] = false
   }
 }
 
@@ -374,7 +227,6 @@ async function removeProfile(profile: AiProfile) {
 
 onMounted(() => {
   load()
-  loadLabelStatus()
 })
 </script>
 
@@ -393,109 +245,6 @@ onMounted(() => {
 
     <div v-if="error" class="warning" role="alert">{{ error }}</div>
     <div v-if="message" class="settings-success"><Check :size="17" />{{ message }}</div>
-
-    <section class="question-label-workspace card" aria-labelledby="question-label-title">
-      <div class="question-label-heading">
-        <span class="api-profile-icon"><LibraryBig :size="21" /></span>
-        <div>
-          <span class="eyebrow">QUESTION INTELLIGENCE</span>
-          <h2 id="question-label-title">题库智能标注</h2>
-          <p>模型按整篇材料预先标注每道题的考点、干扰项类型与注意事项。分析错题时复用这些标签，减少重复输出。</p>
-        </div>
-      </div>
-      <div class="question-label-controls">
-        <div class="field">
-          <label for="label-year">标注范围</label>
-          <select id="label-year" v-model="labelYear" :disabled="labeling" @change="loadLabelStatus">
-            <option value="">全部年份</option>
-            <option v-for="year in labelStatus?.years || []" :key="year" :value="year">{{ year }} 年</option>
-          </select>
-        </div>
-        <label class="default-profile-check label-overwrite">
-          <input v-model="overwriteUnlocked" type="checkbox" :disabled="labeling">
-          重新标注未锁定题目
-        </label>
-        <div class="question-label-actions">
-          <button v-if="!labeling" class="button" type="button" @click="runLabeling">
-            <Play :size="16" />开始标注
-          </button>
-          <button v-else class="button secondary" type="button" @click="pauseLabeling">
-            <Pause :size="16" />暂停
-          </button>
-          <button class="button secondary" type="button" :disabled="labeling" @click="loadQuestionLabels">
-            <Search :size="16" />查看与校正
-          </button>
-        </div>
-      </div>
-      <div v-if="labelStatus" class="question-label-progress">
-        <div>
-          <span>已标注 {{ labelStatus.labeled }} / {{ labelStatus.total }} 道</span>
-          <strong>{{ labelStatus.percentage }}%</strong>
-        </div>
-        <div class="question-label-track" role="progressbar" :aria-valuenow="labelStatus.percentage" aria-valuemin="0" aria-valuemax="100">
-          <span :style="{ width: `${labelStatus.percentage}%` }" />
-        </div>
-        <small>
-          {{ labelStatus.locked }} 道标签已锁定；人工校正后会默认锁定，不会被批量任务覆盖。
-          <template v-if="labelStatus.review_pending">
-            其中 {{ labelStatus.review_pending }} 道原题结构待校正，错题分析会暂时忽略其预标注。
-          </template>
-        </small>
-      </div>
-      <p v-if="labelMessage" class="api-profile-notice" role="status">{{ labelMessage }}</p>
-      <div v-if="labelManagerOpen" class="question-label-manager">
-        <div class="question-label-filter">
-          <div class="field">
-            <label for="label-search">搜索标签</label>
-            <input id="label-search" v-model="labelSearch" placeholder="篇目、题号或主要考点" @keyup.enter="loadQuestionLabels">
-          </div>
-          <button class="button secondary compact" type="button" @click="loadQuestionLabels"><Search :size="15" />搜索</button>
-        </div>
-        <div v-if="labelRows.length" class="question-label-list">
-          <button
-            v-for="row in labelRows"
-            :key="row.question_id"
-            type="button"
-            class="question-label-row"
-            :class="{ unlabeled: !row.primary_skill }"
-            @click="editLabel(row)"
-          >
-            <span><strong>{{ row.year }} 年 · {{ row.unit_title }}</strong><small>第 {{ row.number }} 题</small></span>
-            <span>{{ row.primary_skill || '尚未标注' }}</span>
-            <span class="question-label-state"><Lock v-if="row.locked" :size="13" />{{ row.locked ? '已锁定' : '可更新' }}</span>
-          </button>
-        </div>
-        <div v-else class="api-model-empty">当前范围没有符合条件的题目。</div>
-      </div>
-    </section>
-
-    <div v-if="editingLabel" class="label-editor-overlay" role="presentation" @click.self="editingLabel=null">
-      <section class="label-editor card" role="dialog" aria-modal="true" aria-labelledby="label-editor-title">
-        <header>
-          <div><span class="eyebrow">MANUAL REVIEW</span><h2 id="label-editor-title">{{ editingLabel.year }} 年第 {{ editingLabel.number }} 题</h2></div>
-          <button class="button ghost compact" type="button" @click="editingLabel=null">取消</button>
-        </header>
-        <div class="field"><label>主要考点</label><input v-model.trim="editingLabel.primary_skill"></div>
-        <div class="field"><label>次要考点（逗号分隔）</label><input :value="editingLabel.secondary_skills.join('，')" @input="editingLabel.secondary_skills=splitTags(($event.target as HTMLInputElement).value)"></div>
-        <div class="field"><label>常见陷阱（逗号分隔）</label><textarea :value="editingLabel.trap_types.join('，')" rows="2" @input="editingLabel.trap_types=splitTags(($event.target as HTMLTextAreaElement).value)"></textarea></div>
-        <div class="field"><label>注意事项（每条用逗号或换行分隔）</label><textarea :value="editingLabel.attention_points.join('\n')" rows="3" @input="editingLabel.attention_points=splitTags(($event.target as HTMLTextAreaElement).value)"></textarea></div>
-        <div class="grid grid-3">
-          <div class="field"><label>词汇依赖</label><select v-model="editingLabel.vocabulary_demand"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
-          <div class="field"><label>上下文依赖</label><select v-model="editingLabel.context_dependency"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
-          <div class="field"><label>语法依赖</label><select v-model="editingLabel.grammar_dependency"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
-        </div>
-        <label class="default-profile-check">
-          <input v-model="editingLabel.locked" type="checkbox">
-          保存后锁定，后续批量标注不会覆盖
-        </label>
-        <footer>
-          <small>人工保存的内容会标记为“人工校正”，默认建议保持锁定。</small>
-          <button class="button" type="button" :disabled="busy[busyKey('label',editingLabel.question_id)] || !editingLabel.primary_skill.trim()" @click="saveQuestionLabel">
-            <Save :size="16" />保存标签
-          </button>
-        </footer>
-      </section>
-    </div>
 
     <section v-if="creating" class="api-profile-card new-profile">
       <div class="api-profile-heading">

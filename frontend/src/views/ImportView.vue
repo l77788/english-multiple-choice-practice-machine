@@ -1,8 +1,53 @@
 <script setup lang="ts">
-import { Check, Download, FileArchive, FileCheck2, FileKey2, FileUp, RefreshCw, Sparkles } from 'lucide-vue-next'
-import { computed, onMounted, ref } from 'vue'
+import {
+  Check,
+  Download,
+  FileArchive,
+  FileCheck2,
+  FileKey2,
+  FileUp,
+  LibraryBig,
+  Lock,
+  Pause,
+  Play,
+  RefreshCw,
+  Save,
+  Search,
+  Settings,
+  Sparkles,
+} from 'lucide-vue-next'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, get, patch, post, put } from '../api'
+import {
+  type LabelScope,
+  type LabelStatus,
+  loadQuestionLabelingStatus,
+  pauseQuestionLabeling,
+  questionLabelingState,
+  startQuestionLabeling,
+} from '../services/questionLabeling'
 
+type QuestionLabel = {
+  question_id: number
+  number: number
+  year: number
+  unit_title: string
+  primary_skill: string
+  secondary_skills: string[]
+  trap_types: string[]
+  attention_points: string[]
+  vocabulary_demand: 'low' | 'medium' | 'high'
+  context_dependency: 'low' | 'medium' | 'high'
+  grammar_dependency: 'low' | 'medium' | 'high'
+  confidence: number
+  locked: boolean
+  user_edited: boolean
+  model_name: string
+  updated_at: string
+}
+
+const router = useRouter()
 const jobs = ref<any[]>([])
 const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
@@ -28,6 +73,22 @@ const esqJobs = ref<any[]>([])
 const esqCurrent = ref<any>(null)
 const selectedEsqFile = ref<File | null>(null)
 const esqResolutions = ref<Record<string, 'keep_existing' | 'replace_with_imported'>>({})
+const labelScopeMode = ref('all')
+const importLabelScope = ref<LabelScope | null>(null)
+const overwriteUnlocked = ref(false)
+const labelManagerOpen = ref(false)
+const labelRows = ref<QuestionLabel[]>([])
+const labelSearch = ref('')
+const editingLabel = ref<QuestionLabel | null>(null)
+const labelBusyQuestionId = ref<number | null>(null)
+const labelPromptOpen = ref(false)
+const labelPromptScope = ref<LabelScope | null>(null)
+const labelPromptStatus = ref<LabelStatus | null>(null)
+const labelPromptModel = ref('')
+const labelPromptHasModel = ref(false)
+const labelPromptBusy = ref(false)
+const labelPromptError = ref('')
+const labelLaterButton = ref<HTMLButtonElement | null>(null)
 const answerUnits = computed(() => current.value?.draft?.units || [])
 const answerProgress = computed(() => {
   const questions = answerUnits.value.flatMap((unit: any) => unit.questions || [])
@@ -39,7 +100,180 @@ const answerProgress = computed(() => {
 
 async function loadJobs() { jobs.value = await get('/imports') }
 async function loadEsqJobs() { esqJobs.value = await get('/question-banks/imports') }
-onMounted(() => Promise.all([loadJobs(), loadEsqJobs()]).catch(e => error.value = String(e)))
+
+function allLabelScope(): LabelScope {
+  return { kind: 'all', title: '全部题库', year: null, paperIds: [] }
+}
+
+function selectedLabelScope(): LabelScope {
+  if (labelScopeMode.value === 'current' && importLabelScope.value) {
+    return importLabelScope.value
+  }
+  if (labelScopeMode.value.startsWith('year:')) {
+    const year = Number(labelScopeMode.value.slice(5))
+    return { kind: 'year', title: `${year} 年题库`, year, paperIds: [] }
+  }
+  return allLabelScope()
+}
+
+function labelScopeQuery(scope: LabelScope) {
+  const query = new URLSearchParams()
+  if (scope.year !== null) query.set('year', String(scope.year))
+  if (scope.paperIds.length) query.set('paper_ids', scope.paperIds.join(','))
+  return query
+}
+
+async function loadSelectedLabelStatus() {
+  try {
+    await loadQuestionLabelingStatus(selectedLabelScope())
+  } catch (cause) {
+    questionLabelingState.error = `读取标注进度失败：${String(cause)}`
+  }
+}
+
+function setImportLabelScope(scope: LabelScope) {
+  importLabelScope.value = scope
+  labelScopeMode.value = 'current'
+}
+
+async function prepareLabelPrompt(scope: LabelScope) {
+  if (questionLabelingState.isRunning || questionLabelingState.isPausing) {
+    notice.value = `“${questionLabelingState.scope?.title || '当前题库'}”正在智能标注，请等待完成或暂停后再启动其他范围。`
+    return
+  }
+  setImportLabelScope(scope)
+  labelPromptScope.value = scope
+  labelPromptOpen.value = true
+  labelPromptBusy.value = true
+  labelPromptError.value = ''
+  labelPromptModel.value = ''
+  labelPromptHasModel.value = false
+  await nextTick()
+  labelLaterButton.value?.focus()
+  try {
+    const [status, profiles] = await Promise.all([
+      loadQuestionLabelingStatus(scope),
+      get<any[]>('/ai/profiles'),
+    ])
+    const defaultProfile = profiles.find(profile => profile.is_default && profile.enabled)
+    const defaultModel = String(defaultProfile?.default_model || '').trim()
+    labelPromptStatus.value = status
+    labelPromptHasModel.value = Boolean(defaultProfile && defaultModel)
+    labelPromptModel.value = labelPromptHasModel.value
+      ? `${defaultProfile.name} / ${defaultModel}`
+      : ''
+  } catch (cause) {
+    labelPromptError.value = String(cause)
+  } finally {
+    labelPromptBusy.value = false
+  }
+}
+
+async function beginPromptedLabeling() {
+  const scope = labelPromptScope.value
+  if (!scope) return
+  if (!labelPromptHasModel.value) {
+    labelPromptOpen.value = false
+    await router.push('/settings')
+    return
+  }
+  if (!labelPromptStatus.value?.remaining && !overwriteUnlocked.value) {
+    labelPromptOpen.value = false
+    notice.value = `${scope.title}已有完整智能标签，无需重复调用模型`
+    return
+  }
+  labelPromptOpen.value = false
+  void startQuestionLabeling(scope, overwriteUnlocked.value)
+}
+
+function closeLabelPrompt() {
+  labelPromptOpen.value = false
+}
+
+function paperIdsFromJob(job: any) {
+  return (job?.published_paper_ids || [])
+    .map((value: unknown) => Number(value))
+    .filter((value: number) => Number.isInteger(value) && value > 0)
+}
+
+async function promptLabelingForJob(job: any) {
+  const paperIds = paperIdsFromJob(job)
+  if (!paperIds.length) return
+  await prepareLabelPrompt({
+    kind: 'papers',
+    title: job.published_scope_title || job.filename || '本次导入题库',
+    year: null,
+    paperIds,
+  })
+}
+
+async function loadQuestionLabels() {
+  const query = labelScopeQuery(selectedLabelScope())
+  if (labelSearch.value.trim()) query.set('search', labelSearch.value.trim())
+  query.set('limit', '120')
+  try {
+    labelRows.value = await get<QuestionLabel[]>(`/ai/question-labels?${query}`)
+    labelManagerOpen.value = true
+  } catch (cause) {
+    questionLabelingState.error = String(cause)
+  }
+}
+
+function editLabel(row: QuestionLabel) {
+  editingLabel.value = {
+    ...row,
+    locked: true,
+    secondary_skills: [...(row.secondary_skills || [])],
+    trap_types: [...(row.trap_types || [])],
+    attention_points: [...(row.attention_points || [])],
+  }
+}
+
+function splitTags(value: string) {
+  return value.split(/[，,；;\n]/).map(item => item.trim()).filter(Boolean)
+}
+
+async function saveQuestionLabel() {
+  const row = editingLabel.value
+  if (!row) return
+  labelBusyQuestionId.value = row.question_id
+  try {
+    await put(`/ai/question-labels/${row.question_id}`, {
+      primary_skill: row.primary_skill,
+      secondary_skills: row.secondary_skills,
+      trap_types: row.trap_types,
+      attention_points: row.attention_points,
+      vocabulary_demand: row.vocabulary_demand,
+      context_dependency: row.context_dependency,
+      grammar_dependency: row.grammar_dependency,
+      confidence: row.confidence,
+      locked: row.locked,
+    })
+    questionLabelingState.message = `已保存并${row.locked ? '锁定' : '解除锁定'} ${row.year} 年第 ${row.number} 题标签`
+    editingLabel.value = null
+    await Promise.all([loadQuestionLabels(), loadSelectedLabelStatus()])
+  } catch (cause) {
+    questionLabelingState.error = String(cause)
+  } finally {
+    labelBusyQuestionId.value = null
+  }
+}
+
+onMounted(async () => {
+  try {
+    await Promise.all([loadJobs(), loadEsqJobs()])
+    if (questionLabelingState.scope?.kind === 'papers') {
+      setImportLabelScope(questionLabelingState.scope)
+    } else if (questionLabelingState.scope?.kind === 'year') {
+      labelScopeMode.value = `year:${questionLabelingState.scope.year}`
+    }
+    if (!questionLabelingState.status) {
+      await loadSelectedLabelStatus()
+    }
+  } catch (cause) {
+    error.value = String(cause)
+  }
+})
 
 async function upload() {
   if (!selectedFile.value) return
@@ -120,6 +354,7 @@ async function retryAssist() {
 }
 
 async function openJob(id: number) {
+  esqCurrent.value = null
   current.value = await get(`/imports/${id}`)
   current.value.draft = current.value.draft_data
   bulkAnswers.value = {}
@@ -222,12 +457,26 @@ async function acceptAi() {
 }
 
 async function publish() {
+  busy.value = true
+  error.value = ''
   try {
     if (current.value.draft.warnings?.length) return
     if (!confirm(`确认发布 ${current.value.draft.year} 年题库吗？发布后模型不能直接修改正式题库。`)) return
-    await post(`/imports/${current.value.id}/publish`)
-    notice.value = '题库已正式发布'; await loadJobs(); await openJob(current.value.id)
+    const result: any = await post(`/imports/${current.value.id}/publish`)
+    notice.value = '题库已正式发布'
+    await loadJobs()
+    await openJob(current.value.id)
+    const paperIds = result.paper_ids || (result.paper_id ? [result.paper_id] : [])
+    if (paperIds.length) {
+      await prepareLabelPrompt({
+        kind: 'papers',
+        title: result.scope_title || current.value.draft.title || `${current.value.draft.year} 年题库`,
+        year: null,
+        paperIds,
+      })
+    }
   } catch (e) { error.value = String(e) }
+  finally { busy.value = false }
 }
 
 async function uploadEsq() {
@@ -245,6 +494,7 @@ async function uploadEsq() {
 }
 
 async function openEsqJob(id: number) {
+  current.value = null
   esqCurrent.value = await get(`/question-banks/imports/${id}`)
   esqResolutions.value = {}
 }
@@ -264,13 +514,23 @@ async function publishEsq() {
   busy.value = true; error.value = ''
   try {
     const resolutions = Object.entries(esqResolutions.value).map(([paper_key, action]) => ({ paper_key, action }))
-    await post(`/question-banks/imports/${esqCurrent.value.id}/publish`, {
+    const result: any = await post(`/question-banks/imports/${esqCurrent.value.id}/publish`, {
       resolutions,
       import_ai_labels: true,
     })
     notice.value = 'ESQ 题库已发布'
     await loadEsqJobs()
     await openEsqJob(esqCurrent.value.id)
+    if (result.paperIds?.length) {
+      await prepareLabelPrompt({
+        kind: 'papers',
+        title: result.scopeTitle || esqCurrent.value.preview?.title || '本次 ESQ 题库',
+        year: null,
+        paperIds: result.paperIds,
+      })
+    } else {
+      notice.value = 'ESQ 题库已发布；本次选择保留的题库无需重新标注'
+    }
   } catch (e) { error.value = String(e) }
   finally { busy.value = false }
 }
@@ -296,7 +556,73 @@ async function exportEsq(includeLabels = false) {
 <template>
   <div class="page">
     <div class="page-head"><div><span class="eyebrow">IMPORT & REVIEW</span><h1>导入题库</h1><p class="lead">试卷和答案分别解析。即使答案缺失，也可以先保存题目草稿，再人工补全。</p></div></div>
-    <div v-if="error" class="warning">{{ error }}</div><div v-if="notice" class="card" style="margin-bottom:16px;color:var(--success)">{{ notice }}</div>
+    <div v-if="error" class="warning" role="alert">{{ error }}</div><div v-if="notice" class="card" style="margin-bottom:16px;color:var(--success)">{{ notice }}</div>
+
+    <section class="question-label-workspace card" aria-labelledby="question-label-title">
+      <div class="question-label-heading">
+        <span class="api-profile-icon"><LibraryBig :size="21" /></span>
+        <div>
+          <span class="eyebrow">QUESTION INTELLIGENCE</span>
+          <h2 id="question-label-title">题库智能标注</h2>
+          <p>题库批准入库后再启动模型标注，避免草稿被提前消费 Token。默认只处理刚刚入库的试卷，已锁定的人工标签不会被覆盖。</p>
+        </div>
+      </div>
+      <div class="question-label-controls import-label-controls">
+        <div class="field">
+          <label for="label-scope">标注范围</label>
+          <select id="label-scope" v-model="labelScopeMode" :disabled="questionLabelingState.isRunning" @change="loadSelectedLabelStatus">
+            <option value="all">全部未标注题目</option>
+            <option v-if="importLabelScope" value="current">本次入库：{{ importLabelScope.title }}</option>
+            <option v-for="year in questionLabelingState.status?.years || []" :key="year" :value="`year:${year}`">{{ year }} 年未标注题目</option>
+          </select>
+        </div>
+        <label class="default-profile-check label-overwrite">
+          <input v-model="overwriteUnlocked" type="checkbox" :disabled="questionLabelingState.isRunning">
+          重新标注未锁定题目
+        </label>
+        <div class="question-label-actions">
+          <button v-if="!questionLabelingState.isRunning" class="button" type="button" @click="prepareLabelPrompt(selectedLabelScope())">
+            <Play :size="16" />开始标注
+          </button>
+          <button v-else class="button secondary" type="button" :disabled="questionLabelingState.isPausing" @click="pauseQuestionLabeling">
+            <Pause :size="16" />{{ questionLabelingState.isPausing ? '正在暂停…' : '暂停' }}
+          </button>
+          <button class="button secondary" type="button" :disabled="questionLabelingState.isRunning" @click="loadQuestionLabels">
+            <Search :size="16" />查看与校正
+          </button>
+        </div>
+      </div>
+      <div v-if="questionLabelingState.status" class="question-label-progress">
+        <div>
+          <span>已标注 {{ questionLabelingState.status.labeled }} / {{ questionLabelingState.status.total }} 道</span>
+          <strong>{{ questionLabelingState.status.percentage }}%</strong>
+        </div>
+        <div class="question-label-track" role="progressbar" :aria-valuenow="questionLabelingState.status.percentage" aria-valuemin="0" aria-valuemax="100">
+          <span :style="{ width: `${questionLabelingState.status.percentage}%` }" />
+        </div>
+        <small>{{ questionLabelingState.status.locked }} 道标签已锁定；人工校正后会默认锁定，不会被批量任务覆盖。</small>
+      </div>
+      <p v-if="questionLabelingState.message" class="api-profile-notice" role="status">{{ questionLabelingState.message }}</p>
+      <p v-if="questionLabelingState.error" class="warning" role="alert">{{ questionLabelingState.error }}</p>
+      <div v-if="labelManagerOpen" class="question-label-manager">
+        <div class="question-label-filter">
+          <div class="field">
+            <label for="label-search">搜索标签</label>
+            <input id="label-search" v-model="labelSearch" placeholder="篇目、题号或主要考点" @keyup.enter="loadQuestionLabels">
+          </div>
+          <button class="button secondary compact" type="button" @click="loadQuestionLabels"><Search :size="15" />搜索</button>
+        </div>
+        <div v-if="labelRows.length" class="question-label-list">
+          <button v-for="row in labelRows" :key="row.question_id" type="button" class="question-label-row" :class="{ unlabeled: !row.primary_skill }" @click="editLabel(row)">
+            <span><strong>{{ row.year }} 年 · {{ row.unit_title }}</strong><small>第 {{ row.number }} 题</small></span>
+            <span>{{ row.primary_skill || '尚未标注' }}</span>
+            <span class="question-label-state"><Lock v-if="row.locked" :size="13" />{{ row.locked ? '已锁定' : '可更新' }}</span>
+          </button>
+        </div>
+        <div v-else class="api-model-empty">当前范围没有符合条件的题目。</div>
+      </div>
+    </section>
+
     <div class="grid" style="grid-template-columns:320px 1fr">
       <aside>
         <div class="card">
@@ -330,14 +656,16 @@ async function exportEsq(includeLabels = false) {
         </div>
         <div v-if="esqJobs.length">
           <div class="section-title"><h3>ESQ 导入记录</h3><button class="button ghost compact" @click="loadEsqJobs"><RefreshCw :size="14" />刷新</button></div>
-          <button v-for="job in esqJobs" :key="job.id" class="card" style="width:100%;text-align:left;margin-bottom:10px" @click="openEsqJob(job.id)">
-            <strong>{{ job.detected_year || '多年份' }}</strong><div class="lead" style="font-size:12px;margin-top:5px">{{ job.filename }}</div>
-          </button>
+          <div v-for="job in esqJobs" :key="job.id" class="card import-history-card">
+            <button type="button" class="import-history-open" @click="openEsqJob(job.id)"><span><strong>{{ job.detected_year || '多年份' }}</strong><small>{{ job.filename }}</small></span><span v-if="job.published_paper_ids?.length" class="pill">已入库</span></button>
+            <button v-if="job.published_paper_ids?.length" class="button ghost compact" type="button" @click="promptLabelingForJob(job)"><Sparkles :size="14" />开始智能标注</button>
+          </div>
         </div>
         <div class="section-title"><h3>导入记录</h3></div>
-        <button v-for="job in jobs" :key="job.id" class="card" style="width:100%;text-align:left;margin-bottom:10px" @click="openJob(job.id)">
-          <strong>{{ job.detected_year || '未知年份' }}</strong><div class="lead" style="font-size:12px;margin-top:5px">{{ job.filename }}</div>
-        </button>
+        <div v-for="job in jobs" :key="job.id" class="card import-history-card">
+          <button type="button" class="import-history-open" @click="openJob(job.id)"><span><strong>{{ job.detected_year || '未知年份' }}</strong><small>{{ job.filename }}</small></span><span v-if="job.published_paper_ids?.length" class="pill">已入库</span></button>
+          <button v-if="job.published_paper_ids?.length" class="button ghost compact" type="button" @click="promptLabelingForJob(job)"><Sparkles :size="14" />开始智能标注</button>
+        </div>
       </aside>
       <section v-if="esqCurrent?.preview" class="grid">
         <div class="card">
@@ -477,6 +805,52 @@ async function exportEsq(includeLabels = false) {
         <p>上传或选择一条导入记录后，在这里校对题库。</p>
       </div>
     </div>
+
+    <div v-if="labelPromptOpen" class="label-editor-overlay" role="dialog" aria-modal="true" aria-labelledby="label-prompt-title">
+      <section class="label-editor label-prompt card">
+        <header>
+          <div><span class="eyebrow">POST-PUBLISH OPTION</span><h2 id="label-prompt-title">是否立即进行智能标注？</h2></div>
+          <button class="button ghost compact" type="button" aria-label="稍后处理" @click="closeLabelPrompt">稍后</button>
+        </header>
+        <div class="label-prompt-summary">
+          <strong>{{ labelPromptScope?.title }}</strong>
+          <span v-if="labelPromptBusy">正在读取待标注数量…</span>
+          <span v-else>当前有 {{ labelPromptStatus?.remaining || 0 }} 道题待标注，已标注 {{ labelPromptStatus?.labeled || 0 }} 道</span>
+        </div>
+        <ul class="label-prompt-notes">
+          <li>本次只处理刚刚入库的试卷，不会影响其他年份。</li>
+          <li>将使用默认 API：{{ labelPromptModel || '尚未配置可用模型' }}，会产生 Token 消耗。</li>
+          <li>人工锁定的标签不会被覆盖；任务可在后台继续运行。</li>
+        </ul>
+        <p v-if="labelPromptError" class="warning" role="alert">{{ labelPromptError }}</p>
+        <p v-if="!labelPromptBusy && !labelPromptHasModel" class="api-profile-notice">未检测到已启用且填写默认模型的 API，点击主按钮将前往“模型与 API”配置。</p>
+        <footer>
+          <button ref="labelLaterButton" class="button ghost" type="button" @click="closeLabelPrompt">稍后再说</button>
+          <button class="button" type="button" :disabled="labelPromptBusy || Boolean(labelPromptError)" @click="beginPromptedLabeling"><Settings v-if="!labelPromptHasModel" :size="16" /><Sparkles v-else :size="16" />{{ labelPromptHasModel ? '立即智能标注' : '前往模型与 API' }}</button>
+        </footer>
+      </section>
+    </div>
+
+    <div v-if="editingLabel" class="label-editor-overlay" role="presentation" @click.self="editingLabel=null">
+      <section class="label-editor card" role="dialog" aria-modal="true" aria-labelledby="label-editor-title">
+        <header>
+          <div><span class="eyebrow">MANUAL REVIEW</span><h2 id="label-editor-title">{{ editingLabel.year }} 年第 {{ editingLabel.number }} 题</h2></div>
+          <button class="button ghost compact" type="button" @click="editingLabel=null">取消</button>
+        </header>
+        <div class="field"><label>主要考点</label><input v-model.trim="editingLabel.primary_skill"></div>
+        <div class="field"><label>次要考点（逗号分隔）</label><input :value="editingLabel.secondary_skills.join('，')" @input="editingLabel.secondary_skills=splitTags(($event.target as HTMLInputElement).value)"></div>
+        <div class="field"><label>常见陷阱（逗号分隔）</label><textarea :value="editingLabel.trap_types.join('，')" rows="2" @input="editingLabel.trap_types=splitTags(($event.target as HTMLTextAreaElement).value)"></textarea></div>
+        <div class="field"><label>注意事项（每条用逗号或换行分隔）</label><textarea :value="editingLabel.attention_points.join('\n')" rows="3" @input="editingLabel.attention_points=splitTags(($event.target as HTMLTextAreaElement).value)"></textarea></div>
+        <div class="grid grid-3">
+          <div class="field"><label>词汇依赖</label><select v-model="editingLabel.vocabulary_demand"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+          <div class="field"><label>上下文依赖</label><select v-model="editingLabel.context_dependency"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+          <div class="field"><label>语法依赖</label><select v-model="editingLabel.grammar_dependency"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></div>
+        </div>
+        <label class="default-profile-check"><input v-model="editingLabel.locked" type="checkbox">保存后锁定，后续批量标注不会覆盖</label>
+        <footer><small>人工保存的内容会标记为“人工校正”，默认建议保持锁定。</small><button class="button" type="button" :disabled="labelBusyQuestionId === editingLabel.question_id || !editingLabel.primary_skill.trim()" @click="saveQuestionLabel"><Save :size="16" />保存标签</button></footer>
+      </section>
+    </div>
+
     <div v-if="assistDialogOpen" class="review-overlay" role="dialog" aria-modal="true" aria-label="模型辅助不可用">
       <div class="review-card import-assist-dialog">
         <h3 style="margin-bottom:10px">模型辅助不可用</h3>

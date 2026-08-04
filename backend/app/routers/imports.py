@@ -35,6 +35,22 @@ router = APIRouter(prefix="/imports", tags=["imports"])
 IMPORT_PIPELINE_REVISION = "word-import-2026.08.04.3"
 
 
+def _job_scope_payload(parse_context: str | None) -> dict[str, Any]:
+    try:
+        context = json.loads(parse_context or "{}")
+    except json.JSONDecodeError:
+        context = {}
+    paper_ids = [
+        int(value)
+        for value in context.get("published_paper_ids", [])
+        if isinstance(value, int) and value > 0
+    ]
+    return {
+        "published_paper_ids": paper_ids,
+        "published_scope_title": str(context.get("published_scope_title", "")).strip(),
+    }
+
+
 def _model_identity(
     connection: sqlite3.Connection,
     *,
@@ -53,8 +69,9 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
     rows = connection.execute(
         """
         SELECT id, filename, detected_year, detected_format, status,
-               warnings, created_at, updated_at
+               warnings, parse_context, created_at, updated_at
         FROM import_jobs
+        WHERE detected_format <> 'esq-1.0' OR detected_format IS NULL
         ORDER BY id DESC
         """
     ).fetchall()
@@ -62,6 +79,7 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
     for row in rows:
         payload = dict(row)
         payload["warnings"] = json.loads(payload["warnings"] or "[]")
+        payload.update(_job_scope_payload(payload.pop("parse_context", "{}")))
         result.append(payload)
     return result
 
@@ -373,6 +391,7 @@ def import_detail(
     payload = dict(row)
     payload["draft_data"] = json.loads(payload["draft_data"])
     payload["warnings"] = json.loads(payload["warnings"])
+    payload.update(_job_scope_payload(payload.pop("parse_context", "{}")))
     return payload
 
 
@@ -540,13 +559,40 @@ def publish(
     if warnings and not force:
         raise HTTPException(409, {"message": "仍有校验问题", "warnings": warnings})
     paper_id = publish_draft(connection, draft, row["filename"])
+    try:
+        parse_context = json.loads(row["parse_context"] or "{}")
+    except json.JSONDecodeError:
+        parse_context = {}
+    parse_context["published_paper_ids"] = [paper_id]
+    parse_context["published_scope_title"] = str(draft.get("title") or f"{draft.get('year', '')} 年题库")
     connection.execute(
         """
         UPDATE import_jobs
-        SET status = 'published', warnings = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = 'published', warnings = ?, parse_context = ?,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
-        (json.dumps(warnings, ensure_ascii=False), job_id),
+        (
+            json.dumps(warnings, ensure_ascii=False),
+            json.dumps(parse_context, ensure_ascii=False),
+            job_id,
+        ),
     )
     connection.commit()
-    return {"published": True, "paper_id": paper_id, "warnings": warnings}
+    question_count = connection.execute(
+        """
+        SELECT COUNT(q.id)
+        FROM questions AS q
+        JOIN units AS u ON u.id = q.unit_id
+        WHERE u.paper_id = ?
+        """,
+        (paper_id,),
+    ).fetchone()[0]
+    return {
+        "published": True,
+        "paper_id": paper_id,
+        "paper_ids": [paper_id],
+        "scope_title": parse_context["published_scope_title"],
+        "question_count": int(question_count or 0),
+        "warnings": warnings,
+    }

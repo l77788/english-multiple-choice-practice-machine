@@ -701,7 +701,14 @@ def publish_package(
         action = resolutions.get(paper_key, "replace_with_imported" if existing else "import")
         if existing and action == "keep_existing":
             skipped_papers += 1
-            paper_results.append({"paperKey": paper_key, "action": action, "questionCount": 0})
+            paper_results.append(
+                {
+                    "paperKey": paper_key,
+                    "paperId": int(existing["id"]),
+                    "action": action,
+                    "questionCount": 0,
+                }
+            )
             continue
         if action not in {"import", "replace_with_imported"}:
             raise ValueError(f"{paper_key} 的冲突处理动作无效：{action}")
@@ -962,6 +969,7 @@ def publish_package(
         paper_results.append(
             {
                 "paperKey": paper_key,
+                "paperId": int(paper_id),
                 "action": action,
                 "questionCount": len(imported_question_keys),
                 "preservedExistingPaper": bool(existing),

@@ -78,6 +78,7 @@ class AiAnalyzeRequest(BaseModel):
 
 class AiLabelBatchRequest(BaseModel):
     year: int | None = None
+    paper_ids: list[int] = Field(default_factory=list, max_length=100)
     overwrite_unlocked: bool = False
     run_id: str = Field(default="", max_length=80)
 

@@ -887,9 +887,20 @@ def wrong_analysis_status(
 @router.get("/question-labels/status")
 def question_labels_status(
     year: int | None = None,
+    paper_ids: str = "",
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
-    return labeling_status(connection, year)
+    try:
+        selected_paper_ids = [
+            int(value.strip())
+            for value in paper_ids.split(",")
+            if value.strip()
+        ]
+    except ValueError as error:
+        raise HTTPException(422, "paper_ids 必须是逗号分隔的数字") from error
+    if len(selected_paper_ids) > 100 or any(value <= 0 for value in selected_paper_ids):
+        raise HTTPException(422, "paper_ids 最多包含 100 个正整数")
+    return labeling_status(connection, year, selected_paper_ids)
 
 
 @router.post("/question-labels/next")
@@ -897,10 +908,13 @@ def label_questions_next(
     request: AiLabelBatchRequest,
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    if any(value <= 0 for value in request.paper_ids):
+        raise HTTPException(422, "paper_ids 只能包含正整数")
     try:
         return label_next_unit(
             connection,
             year=request.year,
+            paper_ids=request.paper_ids,
             overwrite_unlocked=request.overwrite_unlocked,
             run_id=request.run_id.strip(),
         )
@@ -911,6 +925,7 @@ def label_questions_next(
 @router.get("/question-labels")
 def list_question_labels(
     year: int | None = None,
+    paper_ids: str = "",
     search: str = "",
     limit: int = 100,
     connection: sqlite3.Connection = Depends(get_db),
@@ -920,6 +935,21 @@ def list_question_labels(
     if year is not None:
         conditions.append("p.year = ?")
         params.append(year)
+    try:
+        selected_paper_ids = [
+            int(value.strip())
+            for value in paper_ids.split(",")
+            if value.strip()
+        ]
+    except ValueError as error:
+        raise HTTPException(422, "paper_ids 必须是逗号分隔的数字") from error
+    if len(selected_paper_ids) > 100 or any(value <= 0 for value in selected_paper_ids):
+        raise HTTPException(422, "paper_ids 最多包含 100 个正整数")
+    if selected_paper_ids:
+        conditions.append(
+            f"p.id IN ({','.join('?' for _ in selected_paper_ids)})"
+        )
+        params.extend(selected_paper_ids)
     if search.strip():
         conditions.append(
             "(CAST(q.number AS TEXT) LIKE ? OR u.title LIKE ? OR l.primary_skill LIKE ?)"

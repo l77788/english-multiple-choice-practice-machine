@@ -30,12 +30,20 @@ attention_points 必须是抽象方法，不得复述原题或透露答案。
 def labeling_status(
     connection: sqlite3.Connection,
     year: int | None = None,
+    paper_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     params: list[Any] = []
-    year_clause = ""
+    conditions: list[str] = []
     if year is not None:
-        year_clause = "WHERE p.year = ?"
+        conditions.append("p.year = ?")
         params.append(year)
+    normalized_paper_ids = sorted({int(value) for value in paper_ids or [] if int(value) > 0})
+    if normalized_paper_ids:
+        conditions.append(
+            f"p.id IN ({','.join('?' for _ in normalized_paper_ids)})"
+        )
+        params.extend(normalized_paper_ids)
+    scope_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     row = connection.execute(
         f"""
         SELECT COUNT(q.id) AS total,
@@ -47,7 +55,7 @@ def labeling_status(
         JOIN units AS u ON u.id = q.unit_id
         JOIN papers AS p ON p.id = u.paper_id
         LEFT JOIN question_ai_labels AS l ON l.question_id = q.id
-        {year_clause}
+        {scope_clause}
         """,
         params,
     ).fetchone()
@@ -61,6 +69,7 @@ def labeling_status(
     labeled = int(row["labeled"] or 0)
     return {
         "year": year,
+        "paper_ids": normalized_paper_ids,
         "years": years,
         "total": total,
         "labeled": labeled,
@@ -84,6 +93,7 @@ def _next_unit(
     connection: sqlite3.Connection,
     *,
     year: int | None,
+    paper_ids: list[int] | None,
     overwrite_unlocked: bool,
     run_id: str,
 ) -> sqlite3.Row | None:
@@ -95,6 +105,12 @@ def _next_unit(
     if year is not None:
         conditions.append("p.year = ?")
         params.append(year)
+    normalized_paper_ids = sorted({int(value) for value in paper_ids or [] if int(value) > 0})
+    if normalized_paper_ids:
+        conditions.append(
+            f"p.id IN ({','.join('?' for _ in normalized_paper_ids)})"
+        )
+        params.extend(normalized_paper_ids)
     return connection.execute(
         f"""
         SELECT u.id, u.title, u.unit_type, u.passage, p.year
@@ -324,6 +340,7 @@ def label_next_unit(
     connection: sqlite3.Connection,
     *,
     year: int | None,
+    paper_ids: list[int] | None = None,
     overwrite_unlocked: bool,
     run_id: str = "",
 ) -> dict[str, Any]:
@@ -331,6 +348,7 @@ def label_next_unit(
     unit = _next_unit(
         connection,
         year=year,
+        paper_ids=paper_ids,
         overwrite_unlocked=overwrite_unlocked,
         run_id=effective_run_id,
     )
@@ -339,7 +357,7 @@ def label_next_unit(
             "done": True,
             "processed": 0,
             "run_id": effective_run_id,
-            **labeling_status(connection, year),
+            **labeling_status(connection, year, paper_ids),
         }
     questions = _question_payload(
         connection,
@@ -354,7 +372,7 @@ def label_next_unit(
             "run_id": effective_run_id,
             "unit_id": unit["id"],
             "unit_title": f"{unit['year']} 年 {unit['title']}",
-            **labeling_status(connection, year),
+            **labeling_status(connection, year, paper_ids),
         }
     profile = get_ai_profile(connection)
     processed = 0
@@ -379,7 +397,7 @@ def label_next_unit(
         "run_id": effective_run_id,
         "unit_id": unit["id"],
         "unit_title": f"{unit['year']} 年 {unit['title']}",
-        **labeling_status(connection, year),
+        **labeling_status(connection, year, paper_ids),
     }
 
 

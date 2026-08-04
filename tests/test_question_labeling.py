@@ -5,12 +5,37 @@ import unittest
 from unittest.mock import patch
 
 from backend.app.services.question_labeling import (
+    labeling_status,
     _normalized_label_list,
     _request_batch_with_fallback,
 )
 
 
 class QuestionLabelingTests(unittest.TestCase):
+    def test_labeling_status_accepts_explicit_paper_scope(self) -> None:
+        class FakeConnection:
+            count_sql = ""
+            count_params = []
+
+            def execute(self, sql, params=()):
+                if "COUNT(q.id)" in sql:
+                    self.count_sql = sql
+                    self.count_params = list(params)
+                    return type("Result", (), {"fetchone": lambda _: {
+                        "total": 3,
+                        "labeled": 1,
+                        "locked": 1,
+                        "review_pending": 0,
+                    }})()
+                return type("Result", (), {"fetchall": lambda _: [{"year": 2002}]})()
+
+        connection = FakeConnection()
+        result = labeling_status(connection, paper_ids=[8, 7, 8])
+        self.assertEqual(result["paper_ids"], [7, 8])
+        self.assertIn("p.id IN (?,?)", connection.count_sql)
+        self.assertEqual(connection.count_params, [7, 8])
+        self.assertEqual(result["remaining"], 2)
+
     def test_invalid_large_batch_is_split_and_retried(self) -> None:
         questions = [{"id": value} for value in range(1, 6)]
         calls: list[int] = []

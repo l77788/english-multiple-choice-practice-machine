@@ -34,7 +34,20 @@ def _error(code: str, message: str, details: object | None = None) -> HTTPExcept
 def _serialize_job(row: sqlite3.Row) -> dict:
     payload = dict(row)
     payload["warnings"] = json.loads(payload.get("warnings") or "[]")
-    payload["draft_data"] = json.loads(payload.get("draft_data") or "{}")
+    if "draft_data" in payload:
+        payload["draft_data"] = json.loads(payload.get("draft_data") or "{}")
+    try:
+        parse_context = json.loads(payload.pop("parse_context", "{}") or "{}")
+    except json.JSONDecodeError:
+        parse_context = {}
+    payload["published_paper_ids"] = [
+        int(value)
+        for value in parse_context.get("published_paper_ids", [])
+        if isinstance(value, int) and value > 0
+    ]
+    payload["published_scope_title"] = str(
+        parse_context.get("published_scope_title", "")
+    ).strip()
     return payload
 
 
@@ -45,7 +58,7 @@ def list_question_bank_imports(
     rows = connection.execute(
         """
         SELECT id, filename, detected_year, detected_format, status,
-               warnings, created_at, updated_at
+               warnings, parse_context, created_at, updated_at
         FROM import_jobs
         WHERE detected_format = 'esq-1.0'
         ORDER BY id DESC
@@ -172,16 +185,40 @@ def publish_question_bank(
             resolutions,
             import_ai_labels=request.import_ai_labels,
         )
+        published_papers = [
+            item
+            for item in result.get("papers", [])
+            if item.get("action") != "keep_existing" and item.get("paperId")
+        ]
+        published_paper_ids = [int(item["paperId"]) for item in published_papers]
+        try:
+            parse_context = json.loads(row["parse_context"] or "{}")
+        except json.JSONDecodeError:
+            parse_context = {}
+        parse_context["published_paper_ids"] = published_paper_ids
+        parse_context["published_scope_title"] = str(
+            preview.get("title") or row["filename"]
+        )
         connection.execute(
             """
             UPDATE import_jobs
-            SET status = 'published', updated_at = CURRENT_TIMESTAMP
+            SET status = 'published', parse_context = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (job_id,),
+            (json.dumps(parse_context, ensure_ascii=False), job_id),
         )
         connection.commit()
-        return {"published": True, **result}
+        question_count = sum(
+            int(item.get("questionCount", 0) or 0) for item in published_papers
+        )
+        return {
+            "published": True,
+            **result,
+            "paperIds": published_paper_ids,
+            "scopeTitle": parse_context["published_scope_title"],
+            "questionCount": question_count,
+        }
     except Exception as error:
         connection.rollback()
         raise _error("PUBLISH_FAILED", "题库包发布失败，请检查冲突和数据完整性") from error
