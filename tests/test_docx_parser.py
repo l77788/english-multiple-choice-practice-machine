@@ -7,9 +7,11 @@ from lxml import etree
 from backend.app.services.docx_parser import (
     NS,
     _extract_answers_from_text,
+    _detect_subject,
     _ensure_numbered_blanks,
     _extract_ooxml_text,
     _has_objective_part_b,
+    _parse_part_b,
     _remove_duplicate_cloze_number_noise,
     apply_answers_to_draft,
     clean_text,
@@ -143,6 +145,61 @@ class OoxmlBlankExtractionTests(unittest.TestCase):
                 1: "A", 2: "D", 3: "C", 4: "B", 5: "B",
                 6: "A", 7: "D", 8: "D", 9: "C", 10: "B",
             },
+        )
+
+    def test_english_two_embedded_answer_layout_is_supported(self) -> None:
+        blocks = [
+            "2010年英语二参考真题答案",
+            "1.D 2.C 3.B 4.A 5.A",
+            "Text 121~25D A B C CText 226~30A C B D B",
+            "Part B",
+            "41.F 42.T 43.F 44.T 45.F",
+        ]
+        answers = extract_answer_key(blocks)
+        self.assertEqual([answers[n] for n in range(21, 26)], list("DABCC"))
+        self.assertEqual([answers[n] for n in range(41, 46)], list("FTFTF"))
+
+    def test_english_two_subject_is_detected_from_header(self) -> None:
+        self.assertEqual(
+            _detect_subject(
+                "2010年考研英语二真题.doc",
+                ["2010 年全国硕士研究生招生考试", "英语（二）", "（科目代码：204）"],
+            ),
+            "英语二",
+        )
+
+    def test_true_false_part_b_is_parsed_as_objective_questions(self) -> None:
+        blocks = [
+            "Section II Reading Comprehension",
+            "Part B",
+            "Directions:",
+            "Read the following text and decide whether each of the statements is true or false. Choose T if the statement is true or F if the statement is not true.",
+            "Article paragraph one.",
+            "Article paragraph two.",
+            "Statement one.",
+            "Statement two.",
+            "Statement three.",
+            "Statement four.",
+            "Statement five.",
+            "Section IIITranslation",
+        ]
+        self.assertTrue(_has_objective_part_b(blocks))
+        unit = _parse_part_b(
+            blocks,
+            {41: "F", 42: "T", 43: "F", 44: "T", 45: "F"},
+        )
+        self.assertEqual(unit["subtype"], "true_false")
+        self.assertEqual(unit["passage"], "Article paragraph one.\n\nArticle paragraph two.")
+        self.assertEqual([question["stem"] for question in unit["questions"]], [
+            "Statement one.",
+            "Statement two.",
+            "Statement three.",
+            "Statement four.",
+            "Statement five.",
+        ])
+        self.assertEqual(
+            [option["key"] for option in unit["questions"][0]["options"]],
+            ["T", "F"],
         )
 
     def test_translation_part_b_is_not_treated_as_objective(self) -> None:

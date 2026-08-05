@@ -427,7 +427,7 @@ function updateCandidate(unit: any, key: string, value: string) {
 }
 
 function applyBulkAnswers(unit: any) {
-  const letters = String(bulkAnswers.value[unit.title] || '').toUpperCase().match(/[A-H]/g) || []
+  const letters = String(bulkAnswers.value[unit.title] || '').toUpperCase().match(/[A-HT]/g) || []
   if (letters.length !== unit.questions.length) {
     error.value = `${unit.title} 需要输入 ${unit.questions.length} 个答案，当前识别到 ${letters.length} 个`
     return
@@ -815,8 +815,8 @@ async function exportEsq(includeLabels = false) {
             </button>
             <div v-if="isEditorUnitOpen(unit)" class="draft-unit-body">
               <label class="field"><span>篇目说明 / 方向</span><textarea :value="unit.shared_data?.directions || ''" @input="setUnitField(unit, 'directions', ($event.target as HTMLTextAreaElement).value)" rows="2" placeholder="可选：填写题型说明或答题要求"></textarea></label>
-              <label class="field" v-if="unit.unit_type !== 'part_b'"><span>文章正文</span><textarea :value="unit.passage || ''" @input="setUnitField(unit, 'passage', ($event.target as HTMLTextAreaElement).value)" rows="6" placeholder="检查段落、空位和断行"></textarea></label>
-              <div v-if="unit.unit_type === 'part_b'" class="draft-candidates">
+              <label class="field" v-if="unit.unit_type !== 'part_b' || unit.subtype === 'true_false'"><span>文章正文</span><textarea :value="unit.passage || ''" @input="setUnitField(unit, 'passage', ($event.target as HTMLTextAreaElement).value)" rows="6" placeholder="检查段落、空位和断行"></textarea></label>
+              <div v-if="unit.unit_type === 'part_b' && unit.subtype !== 'true_false'" class="draft-candidates">
                 <span class="field-label">Part B 候选项</span>
                 <label v-for="(candidate, key) in (unit.shared_data?.candidates || {})" :key="`candidate-${unit.sequence}-${key}`" class="field"><span>{{ key }} 候选段落</span><textarea :value="candidate" rows="3" @input="updateCandidate(unit, String(key), ($event.target as HTMLTextAreaElement).value)"></textarea></label>
               </div>

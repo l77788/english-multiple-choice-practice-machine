@@ -24,6 +24,7 @@ def serialize_question(
     shuffle: bool,
     option_order: list[str] | None = None,
     include_answer: bool = False,
+    preserve_option_labels: bool = False,
 ) -> dict[str, Any]:
     option_rows = connection.execute(
         """
@@ -47,7 +48,11 @@ def serialize_question(
         display_options.append(
             {
                 "stable_key": option["stable_key"],
-                "label": chr(ord("A") + index),
+                "label": (
+                    option["original_label"]
+                    if preserve_option_labels
+                    else chr(ord("A") + index)
+                ),
                 "content": option["content"],
                 "metadata": option_metadata,
                 "content_blocks": option_metadata.get("content_blocks", []),
@@ -120,6 +125,7 @@ def serialize_unit(
             shuffle=shuffle_options and shared_part_b_order is None,
             option_order=(answer_orders or {}).get(row["id"]) or shared_part_b_order,
             include_answer=include_answers,
+            preserve_option_labels=unit["subtype"] == "true_false",
         )
         for row in question_rows
     ]

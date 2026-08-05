@@ -121,7 +121,7 @@ def run_model_assist(
  "question_fixes": [{"number": 5, "stem": "...", "options": [{"key": "A", "content": "..."}]}],
  "issues": ["第5题选项疑似属于第6题"], "notes": "简要说明"}
 answer_map 的题号使用材料核对后的最终题号；number_map 只描述草稿旧题号到最终题号的变化。
-answer_map 的值只能是单个字母 A-H；没有把握的题不要填。不要输出逐题解析，不要翻译文章。
+answer_map 的值只能是单个字母 A-H，或判断题使用 T/F；没有把握的题不要填。不要输出逐题解析，不要翻译文章。
 """.strip()
     payload = {
         "document_text": document_text,
@@ -236,7 +236,7 @@ def apply_model_assist(
             normalized_letter = str(letter or "").strip().upper()
             if normalized_number not in expected_numbers:
                 continue
-            if len(normalized_letter) != 1 or normalized_letter not in "ABCDEFGH":
+            if len(normalized_letter) != 1 or normalized_letter not in "ABCDEFGHT":
                 continue
             answers[normalized_number] = normalized_letter
             answer_sources[normalized_number] = "模型辅助"

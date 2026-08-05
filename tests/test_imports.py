@@ -295,6 +295,27 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertEqual(result["model_assist"]["applied_answers"], 1)
         self.assertEqual(result["answer_sources"]["21"], "模型辅助")
 
+    def test_model_assist_accepts_true_false_answers(self) -> None:
+        from backend.app.services.import_assist import apply_model_assist
+
+        draft = self._minimal_draft()
+        question = draft["units"][0]["questions"][0]
+        question["number"] = 41
+        question["options"] = [
+            {"key": "T", "content": "True"},
+            {"key": "F", "content": "False"},
+        ]
+        draft["units"][0]["unit_type"] = "part_b"
+        draft["units"][0]["subtype"] = "true_false"
+
+        result = apply_model_assist(
+            draft,
+            {"answer_map": {"41": "T"}, "number_map": {}, "issues": []},
+        )
+
+        self.assertEqual(result["answers"]["41"], "T")
+        self.assertEqual(result["answer_sources"]["41"], "模型辅助")
+
     def test_option_parser_keeps_word_final_letters(self) -> None:
         from backend.app.services.docx_parser import _split_option_text
 

@@ -492,7 +492,7 @@ def update_answers(
             raise HTTPException(422, f"无效题号：{number}")
         if normalized_number not in allowed_numbers:
             raise HTTPException(422, f"第 {normalized_number} 题不属于当前客观题草稿")
-        if normalized_answer and normalized_answer not in "ABCDEFGH":
+        if normalized_answer and normalized_answer not in "ABCDEFGHT":
             raise HTTPException(422, f"第 {normalized_number} 题答案无效")
         draft.setdefault("answers", {})[normalized_number] = normalized_answer
         if normalized_answer:

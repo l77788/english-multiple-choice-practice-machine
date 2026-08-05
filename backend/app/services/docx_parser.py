@@ -26,6 +26,7 @@ OPTION_MARK_RE = re.compile(
 )
 QUESTION_NUMBER_RE = re.compile(r"^\s*([1-5]?\d)\s*[\.．、)]\s*(.+)$", re.S)
 TEXT_MARK_RE = re.compile(r"^\s*Text\s*([1-4lI])\s*$", re.I)
+ANSWER_SYMBOL_RE = r"(?:[A-H]|T)"
 INVISIBLE_TEXT_RE = re.compile(
     r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ue000-\uf8ff]"
 )
@@ -376,7 +377,7 @@ def _parse_numbered_options(text: str) -> list[dict[str, Any]]:
 def _extract_answers_from_text(text: str) -> dict[int, str]:
     answers: dict[int, str] = {}
     for number, letter in re.findall(
-        r"(?<!\d)([1-5]?\d)\s*[\.．、:：]\s*([A-H])(?=\s|$|\d|[.,，。])",
+        rf"(?<!\d)([1-5]?\d)\s*[\.．、:：]\s*({ANSWER_SYMBOL_RE})(?=\s|$|\d|[.,，。])",
         text,
         re.I,
     ):
@@ -384,9 +385,26 @@ def _extract_answers_from_text(text: str) -> dict[int, str]:
         if 1 <= numeric <= 45:
             answers[numeric] = letter.upper()
 
+    range_pattern = re.compile(
+        r"(?:Text\s*[1-4]\s*|(?<![A-Za-z0-9]))"
+        r"([1-4]?\d)\s*[-~～至–—]\s*([1-4]?\d)\s*[:：]?\s*"
+        r"(.*?)"
+        r"(?=Text\s*[1-4]\s*[1-4]?\d\s*[-~～至–—]\s*[1-4]?\d"
+        r"|(?<![A-Za-z0-9])[1-4]?\d\s*[-~～至–—]\s*[1-4]?\d"
+        r"|Part\s+[BC]|Section\s+[ⅠⅡⅢIV1234]|$)",
+        re.I | re.S,
+    )
+    for match in range_pattern.finditer(text):
+        first, last = int(match.group(1)), int(match.group(2))
+        letters = re.findall(ANSWER_SYMBOL_RE, match.group(3).upper())
+        expected = last - first + 1
+        if expected > 0 and len(letters) == expected:
+            for offset, letter in enumerate(letters):
+                answers[first + offset] = letter
+
     compact = re.sub(r"\s+", "", text).upper()
     for start, end, letters in re.findall(
-        r"(?<!\d)([1-4]?\d)[-~～至–—]([1-4]?\d)[:：]?([A-H]{2,20})",
+        rf"(?<!\d)([1-4]?\d)[-~～至–—]([1-4]?\d)[:：]?((?:{ANSWER_SYMBOL_RE}){{2,20}})",
         compact,
     ):
         first, last = int(start), int(end)
@@ -406,7 +424,7 @@ def extract_answer_key(
     text = "\n".join(blocks)
     heading_matches = list(
         re.finditer(
-            r"答案速查|参考答案|标准答案|answer\s*key|^\s*answers?\s*[:：]?\s*$",
+            r"答案速查|参考(?:真题)?答案|标准答案|answer\s*key|^\s*answers?\s*[:：]?\s*$",
             text,
             re.I | re.M,
         )
@@ -743,6 +761,8 @@ def _parse_reading(blocks: list[str], answers: dict[int, str]) -> list[dict[str,
 
 def _part_b_subtype(direction: str) -> str:
     low = direction.lower()
+    if "true or false" in low or ("choose t" in low and "choose" in low):
+        return "true_false"
     if "wrong order" in low or "reorganize" in low:
         return "paragraph_reordering"
     if "paragraphs from the list" in low:
@@ -761,7 +781,99 @@ def _part_b_candidate_count(direction: str, subtype: str) -> int:
     return 8 if subtype == "paragraph_reordering" else 7
 
 
+def _reading_part_b_bounds(blocks: list[str]) -> tuple[int, int]:
+    reading = _find_index(
+        blocks,
+        r"Section\s*(?:II|Ⅱ|2)\s*Reading\s+Comprehension",
+    )
+    if reading < 0:
+        reading = _find_index(blocks, r"Reading\s+Comprehension")
+    part_b = _find_index(blocks, r"^\s*Part\s*B\s*$", max(reading, 0))
+    section_three = _find_index(
+        blocks,
+        r"^\s*Section\s*(?:III|Ⅲ|3)\s*(?:Translation)?\s*$",
+        max(part_b + 1, 0),
+    )
+    if section_three < 0:
+        section_three = _find_index(
+            blocks,
+            r"^\s*Section\s*(?:III|Ⅲ|3)\s*Translation\s*$",
+            max(part_b + 1, 0),
+        )
+    return part_b, section_three
+
+
+def _parse_true_false_part_b(
+    blocks: list[str],
+    answers: dict[int, str],
+    part_b: int,
+    section_end: int,
+) -> dict[str, Any]:
+    section = blocks[part_b + 1 : section_end]
+    direction_parts: list[str] = []
+    content_start = 0
+    for index, text in enumerate(section):
+        if index == 0 and re.match(r"^\s*Directions:\s*$", text, re.I):
+            direction_parts.append(text)
+            content_start = index + 1
+            continue
+        if direction_parts and re.search(
+            r"true\s+or\s+false|choose\s+T|ANSWER\s+SHEET|questions?",
+            text,
+            re.I,
+        ):
+            direction_parts.append(text)
+            content_start = index + 1
+            continue
+        break
+
+    content = [
+        text
+        for text in section[content_start:]
+        if not _is_noise(text)
+    ]
+    statements = content[-5:] if len(content) >= 5 else []
+    passage = content[:-5] if len(content) >= 5 else content
+    direction = clean_text(" ".join(direction_parts))
+    options = [
+        {"key": "T", "content": "True"},
+        {"key": "F", "content": "False"},
+    ]
+    return {
+        "unit_type": "part_b",
+        "subtype": "true_false",
+        "title": "阅读 Part B（判断题）",
+        "sequence": 6,
+        "passage": "\n\n".join(passage),
+        "shared_data": {
+            "directions": direction,
+            "candidates": {},
+        },
+        "questions": [
+            {
+                "number": number,
+                "stem": statements[index] if index < len(statements) else "",
+                "options": [dict(option) for option in options],
+                "answer": answers.get(number, ""),
+                "score": 2.0,
+            }
+            for index, number in enumerate(range(41, 46))
+        ],
+    }
+
+
 def _parse_part_b(blocks: list[str], answers: dict[int, str]) -> dict[str, Any]:
+    part_b, section_end = _reading_part_b_bounds(blocks)
+    if part_b >= 0 and section_end > part_b:
+        context = " ".join(blocks[part_b : min(section_end, part_b + 4)])
+        if _part_b_subtype(context) == "true_false":
+            return _parse_true_false_part_b(
+                blocks,
+                answers,
+                part_b,
+                section_end,
+            )
+
     direction_index = next(
         (
             index
@@ -873,7 +985,8 @@ def _has_objective_part_b(blocks: list[str]) -> bool:
             return False
         if re.search(
             r"questions?.*?41.*?45|list\s+a|extra\s+choices|wrong\s+order|"
-            r"reorganize|subheading|numbered\s+(?:name|person|paragraph)",
+            r"reorganize|subheading|numbered\s+(?:name|person|paragraph)|"
+            r"true\s+or\s+false|choose\s+t\s+if",
             context,
             re.I,
         ):
@@ -886,6 +999,16 @@ def _has_objective_part_b(blocks: list[str]) -> bool:
         )
         for text in blocks
     )
+
+
+def _detect_subject(source_name: str, blocks: list[str]) -> str:
+    header = " ".join([source_name, *blocks[:12]])
+    if (
+        re.search(r"英语\s*[\(（]?\s*二\s*[\)）]?", header)
+        or re.search(r"科目代码\s*[：:]?\s*204\b", header)
+    ):
+        return "英语二"
+    return "英语一"
 
 
 def objective_question_numbers(draft: dict[str, Any]) -> list[int]:
@@ -948,16 +1071,22 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
         part_b = part_b_units[0]
         if len(part_b["questions"]) != 5:
             warnings.append("Part B 未识别为5题")
-        elif not 7 <= len(part_b.get("shared_data", {}).get("candidates", {})) <= 8:
+        elif (
+            part_b.get("subtype") != "true_false"
+            and not 7 <= len(part_b.get("shared_data", {}).get("candidates", {})) <= 8
+        ):
             warnings.append(
                 "Part B 候选项数量异常："
                 f"{len(part_b.get('shared_data', {}).get('candidates', {}))}"
             )
-        elif any(
-            question.get("answer")
-            and question["answer"]
-            not in part_b.get("shared_data", {}).get("candidates", {})
-            for question in part_b["questions"]
+        elif (
+            part_b.get("subtype") != "true_false"
+            and any(
+                question.get("answer")
+                and question["answer"]
+                not in part_b.get("shared_data", {}).get("candidates", {})
+                for question in part_b["questions"]
+            )
         ):
             warnings.append("Part B 标准答案未能对应候选项")
     expected_units = 5 + (1 if part_b_units else 0)
@@ -989,6 +1118,7 @@ def parse_exam(
         if not year_match:
             year_match = re.search(r"(20\d{2})", " ".join(blocks[:10]))
         year = int(year_match.group(1)) if year_match else None
+        subject = _detect_subject(logical_source_name, blocks)
         answer_key = extract_answer_key(blocks)
         answer_sources = {
             str(number): "试卷 Word 内置答案" for number in answer_key
@@ -1073,9 +1203,9 @@ def parse_exam(
                 )
         draft = {
             "year": year,
-            "subject": "英语一",
+            "subject": subject,
             "title": (
-                f"{year}年考研英语一真题"
+                f"{year}年考研{subject}真题"
                 if year
                 else Path(logical_source_name).stem
             ),
