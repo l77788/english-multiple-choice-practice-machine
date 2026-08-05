@@ -32,6 +32,7 @@ const resultPanelVisible = ref(false)
 const resultPanelMode = ref<'unit' | 'session'>('unit')
 const resultPanelUnitId = ref<number | null>(null)
 const vocabMenu = ref({ visible: false, x: 0, y: 0, term: '', sentence: '', questionId: null as number | null })
+const audioPlayer = ref<HTMLAudioElement | null>(null)
 type VocabularyTranslationTrigger = 'unit_submit' | 'session_submit' | 'practice_exit'
 type PendingVocabularyRecord = { entryId: number, unitId: number | null }
 const pendingVocabulary = ref<PendingVocabularyRecord[]>([])
@@ -66,8 +67,31 @@ const progress = computed(() => {
 const isPartB = computed(() => activeUnit.value?.unit_type === 'part_b')
 const isMatchingPartB = computed(() => isPartB.value && activeUnit.value?.subtype !== 'true_false')
 const isOrdering = computed(() => activeUnit.value?.subtype === 'paragraph_reordering')
+const isListening = computed(() => activeUnit.value?.unit_type === 'listening')
+const isWordBank = computed(() => activeUnit.value?.unit_type === 'word_bank')
+const isParagraphMatching = computed(() => activeUnit.value?.unit_type === 'paragraph_matching')
+const audioSeekable = computed(() => !timerEnabled.value || timerState.value?.mode === 'finished')
 const orderingItems = ref<any[]>([])
 const candidateOptions = computed(() => activeUnit.value?.questions?.[0]?.options || [])
+const selectedWordBank = ref<Record<string, string>>({})
+
+function onAudioTimeUpdate() {
+  if (!audioSeekable.value && audioPlayer.value) {
+    audioPlayer.value.currentTime = 0
+  }
+}
+
+const usedWordBankLetters = computed(() => new Set(Object.values(selectedWordBank.value).filter(Boolean)))
+const wordBankWords = computed(() => {
+  if (!isWordBank.value) return []
+  const opts = activeUnit.value?.questions?.[0]?.options || []
+  return opts.map((option: any, index: number) => ({
+    key: option.key,
+    label: option.label,
+    content: option.content,
+    used: usedWordBankLetters.value.has(option.key),
+  }))
+})
 const timerElapsedMs = computed(() => {
   const state = timerState.value
   if (!state) return 0
@@ -420,6 +444,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('pagehide', flushVocabularyOnPageHide)
 })
 onBeforeRouteLeave(async () => {
+  if (isListening.value && session.value?.status === 'active' && !activeUnitSubmitted.value) {
+    const proceed = window.confirm('听力练习尚未完成，本次练习记录不会保留。是否继续退出？')
+    if (!proceed) return false
+  }
   await flushVocabularyTranslations('practice_exit')
 })
 
@@ -478,6 +506,19 @@ async function saveOrdering() {
     session.value = await get(`/practice/sessions/${session.value.id}`)
     syncOrdering()
   }
+}
+
+function selectWordBank(question: any, letter: string) {
+  if (session.value.status === 'submitted' || activeUnitSubmitted.value) return
+  const prev = selectedWordBank.value[question.id]
+  if (prev === letter) {
+    const next: Record<string, string> = { ...selectedWordBank.value }
+    delete next[question.id]
+    selectedWordBank.value = next
+  } else {
+    selectedWordBank.value = { ...selectedWordBank.value, [question.id]: letter }
+  }
+  select(question, letter)
 }
 
 function resultClass(question: any, option: any) {
@@ -729,6 +770,16 @@ async function copySelectedTerm() {
       <section class="passage-pane">
         <span class="eyebrow">{{ activeUnit.year }} · {{ activeUnit.title }}</span>
         <h1>{{ activeUnit.unit_type === 'cloze' ? 'Use of English' : activeUnit.title }}</h1>
+        <audio
+          v-if="isListening && session.audio_url"
+          ref="audioPlayer"
+          class="listening-player"
+          :src="session.audio_url"
+          controls
+          :disableRemotePlayback="!audioSeekable"
+          @seeking="audioSeekable ? undefined : $event.preventDefault()"
+          @timeupdate="onAudioTimeUpdate"
+        />
         <p v-if="activeUnit.shared_data?.directions" class="lead" style="margin-bottom:24px">{{ activeUnit.shared_data.directions }}</p>
         <div class="passage" data-vocab-text @contextmenu="openVocabularyMenu">
           <ContentBlocks
@@ -778,6 +829,51 @@ async function copySelectedTerm() {
             <div class="question-title"><strong>{{ question.number }}.</strong> <ContentBlocks v-if="question.stem_blocks?.length" :blocks="question.stem_blocks" :package-id="activeContentPackage.packageId" :content-version="activeContentPackage.contentVersion" /><template v-else>{{ question.stem }}</template></div>
             <div class="match-buttons">
               <button v-for="option in question.options" :key="option.stable_key" class="match-chip" :class="resultClass(question, option)" :disabled="activeUnitSubmitted" @click="select(question, option.stable_key)">{{ option.label }}</button>
+            </div>
+            <div v-if="activeUnitSubmitted" class="match-result" :style="{color:question.is_correct?'var(--success)':'var(--danger)'}">
+              {{ question.is_correct ? '回答正确' : `正确答案：${displayedAnswer(question)}` }}
+            </div>
+          </div>
+        </div>
+        <div v-else-if="isWordBank" class="word-bank-board">
+          <div class="word-bank-list">
+            <button
+              v-for="word in wordBankWords"
+              :key="word.key"
+              class="word-bank-chip"
+              :class="{ used: word.used }"
+              :disabled="activeUnitSubmitted || word.used"
+            >{{ word.label }}. {{ word.content }}</button>
+          </div>
+          <div v-for="question in activeUnit.questions" :key="question.id" class="question-card compact-match" :class="{'unanswered-focus':highlightedQuestionId===question.id}" data-vocab-text :data-question-id="question.id" @contextmenu="openVocabularyMenu">
+            <div class="question-title"><strong>{{ question.number }}.</strong> <ContentBlocks v-if="question.stem_blocks?.length" :blocks="question.stem_blocks" :package-id="activeContentPackage.packageId" :content-version="activeContentPackage.contentVersion" /><template v-else>{{ question.stem }}</template></div>
+            <div class="match-buttons">
+              <button
+                v-for="option in question.options"
+                :key="option.stable_key"
+                class="match-chip"
+                :class="{ ...resultClass(question, option), used: usedWordBankLetters.has(option.key) && question.user_answer !== option.stable_key }"
+                :disabled="activeUnitSubmitted || (usedWordBankLetters.has(option.key) && question.user_answer !== option.stable_key)"
+                @click="selectWordBank(question, option.stable_key)"
+              >{{ option.label }}</button>
+            </div>
+            <div v-if="activeUnitSubmitted" class="match-result" :style="{color:question.is_correct?'var(--success)':'var(--danger)'}">
+              {{ question.is_correct ? '回答正确' : `正确答案：${displayedAnswer(question)}` }}
+            </div>
+          </div>
+        </div>
+        <div v-else-if="isParagraphMatching" class="matching-board">
+          <div v-for="question in activeUnit.questions" :key="question.id" class="question-card compact-match" :class="{'unanswered-focus':highlightedQuestionId===question.id}" data-vocab-text :data-question-id="question.id" @contextmenu="openVocabularyMenu">
+            <div class="question-title"><strong>{{ question.number }}.</strong> <ContentBlocks v-if="question.stem_blocks?.length" :blocks="question.stem_blocks" :package-id="activeContentPackage.packageId" :content-version="activeContentPackage.contentVersion" /><template v-else>{{ question.stem }}</template></div>
+            <div class="match-buttons">
+              <button
+                v-for="option in question.options"
+                :key="option.stable_key"
+                class="match-chip"
+                :class="resultClass(question, option)"
+                :disabled="activeUnitSubmitted"
+                @click="select(question, option.stable_key)"
+              >{{ option.label }}</button>
             </div>
             <div v-if="activeUnitSubmitted" class="match-result" :style="{color:question.is_correct?'var(--success)':'var(--danger)'}">
               {{ question.is_correct ? '回答正确' : `正确答案：${displayedAnswer(question)}` }}
