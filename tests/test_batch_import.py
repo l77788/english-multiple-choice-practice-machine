@@ -64,11 +64,10 @@ class BatchImportDiscoveryTests(unittest.TestCase):
                 set(answers),
             )
 
-    def test_model_assist_output_budget_is_bounded(self) -> None:
+    def test_model_assist_output_budget_is_provider_managed(self) -> None:
         request = ModelAssistRequest(max_tokens=12000)
         self.assertEqual(request.max_tokens, 12000)
-        with self.assertRaises(ValueError):
-            ModelAssistRequest(max_tokens=100000)
+        self.assertEqual(ModelAssistRequest(max_tokens=100000).max_tokens, 100000)
 
     def test_prefers_individual_pdfs_over_combined_three_set_word(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

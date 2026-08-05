@@ -147,6 +147,13 @@ class OoxmlBlankExtractionTests(unittest.TestCase):
             },
         )
 
+    def test_cet_answer_ranges_support_questions_46_to_55_and_a_to_o(self) -> None:
+        answers = _extract_answers_from_text(
+            "26-35: I L B N G E O A D C\n46-50: B C A D C\n51-55: B C D A B"
+        )
+        self.assertEqual([answers[n] for n in range(26, 36)], list("ILBNGEOADC"))
+        self.assertEqual([answers[n] for n in range(46, 56)], list("BCADCBCDAB"))
+
     def test_english_two_embedded_answer_layout_is_supported(self) -> None:
         blocks = [
             "2010年英语二参考真题答案",

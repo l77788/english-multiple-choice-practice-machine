@@ -45,7 +45,7 @@ class AiSettingsUpdate(BaseModel):
     api_key: str | None = None
     model: str
     temperature: float = 0.2
-    max_tokens: int = 1200
+    max_tokens: int = Field(default=0, ge=0)
     system_prompt: str = ""
 
 
@@ -65,7 +65,7 @@ class AiProfileWrite(BaseModel):
     is_default: bool = False
     default_model: str = ""
     temperature: float = 0.2
-    max_tokens: int = 1200
+    max_tokens: int = Field(default=0, ge=0)
     system_prompt: str = ""
 
 
@@ -102,7 +102,7 @@ class AiLabelBatchRequest(BaseModel):
     run_id: str = Field(default="", max_length=80)
     profile_id: int | None = None
     model: str = ""
-    max_tokens: int | None = Field(default=None, ge=512, le=64000)
+    max_tokens: int | None = Field(default=None, ge=0)
 
 
 class AiQuestionLabelUpdate(BaseModel):
@@ -146,10 +146,9 @@ class ModelAssistRequest(BaseModel):
     profile_id: int | None = None
     model: str = ""
     correct_structure: bool = False
-    # Batch imports may need a larger JSON answer map than the normal
-    # interactive import flow. Keep the default behavior unchanged while
-    # allowing a caller to opt into a provider-specific output budget.
-    max_tokens: int | None = Field(default=None, ge=512, le=64000)
+    # Kept for backward compatibility. The application does not send an
+    # output-token cap; the selected provider/model decides its own limit.
+    max_tokens: int | None = Field(default=None, ge=0)
 
 
 class VocabularyCreate(BaseModel):

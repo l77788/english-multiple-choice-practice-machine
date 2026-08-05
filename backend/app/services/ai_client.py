@@ -249,7 +249,6 @@ def chat_completion(
         "model": selected_model,
         "messages": messages,
         "temperature": settings["temperature"],
-        "max_tokens": max_tokens or settings["max_tokens"],
         "stream": False,
     }
     if response_format:
@@ -302,7 +301,7 @@ def chat_completion(
     if not content:
         finish_reason = data["choices"][0].get("finish_reason")
         detail = (
-            "，可能是模型的思考过程耗尽了最大输出长度，请调高该 API 配置的最大输出 Token"
+            "，供应商可能提前终止了回复；请重试或切换模型/API 配置"
             if finish_reason in {"length", "stop"}
             else ""
         )

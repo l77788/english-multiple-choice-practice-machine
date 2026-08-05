@@ -560,7 +560,7 @@ def _translate_vocabulary_batch(
                 {"role": "user", "content": json.dumps({"items": items}, ensure_ascii=False)},
             ],
             response_format={"type": "json_object"},
-            max_tokens=2400,
+            max_tokens=None,
         )
         parsed = parse_json_response(content)
         translations = parsed.get("translations") if isinstance(parsed, dict) else None

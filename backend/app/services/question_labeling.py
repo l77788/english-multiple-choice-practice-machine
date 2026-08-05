@@ -229,7 +229,7 @@ def _request_labels(
         response_format={"type": "json_object"},
         profile_id=profile_id,
         model=model,
-        max_tokens=max_tokens or 4200,
+        max_tokens=None,
     )
     parsed = parse_json_response(raw)
     labels = parsed.get("labels") if isinstance(parsed, dict) else None

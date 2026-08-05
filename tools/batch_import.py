@@ -53,7 +53,7 @@ ANSWER_WORDS = (
 IGNORED_WORDS = ANSWER_WORDS + ("听力", "listening", "audio", "音频")
 DEFAULT_BASE_URL = "http://127.0.0.1:8765/api"
 DEFAULT_STATE = ".codex-local/batch-import-state.json"
-DEFAULT_MAX_TOKENS = 12000
+DEFAULT_MAX_TOKENS = 0
 
 
 @dataclass(frozen=True)

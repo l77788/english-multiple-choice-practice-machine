@@ -316,6 +316,27 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertEqual(result["answers"]["41"], "T")
         self.assertEqual(result["answer_sources"]["41"], "模型辅助")
 
+    def test_model_assist_accepts_cet_a_to_o_answers(self) -> None:
+        from backend.app.services.import_assist import apply_model_assist
+
+        draft = self._minimal_draft()
+        question = draft["units"][0]["questions"][0]
+        question["number"] = 26
+        question["options"] = [
+            {"key": chr(ord("A") + index), "content": f"word-{index}"}
+            for index in range(15)
+        ]
+        draft["units"][0]["unit_type"] = "word_bank"
+        draft["units"][0]["subtype"] = "word_bank"
+
+        result = apply_model_assist(
+            draft,
+            {"answer_map": {"26": "O"}, "number_map": {}, "issues": []},
+        )
+
+        self.assertEqual(result["answers"]["26"], "O")
+        self.assertEqual(result["answer_sources"]["26"], "模型辅助")
+
     def test_option_parser_keeps_word_final_letters(self) -> None:
         from backend.app.services.docx_parser import _split_option_text
 
@@ -566,7 +587,7 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertEqual(question["stem"], "Question")
         self.assertEqual(question["options"][0]["content"], "A")
 
-    def test_model_assist_uses_full_paper_output_budget(self) -> None:
+    def test_model_assist_leaves_output_budget_to_provider(self) -> None:
         from backend.app.services import import_assist
 
         with patch.object(
@@ -581,7 +602,109 @@ class ImportAnswerFlowTests(unittest.TestCase):
             )
 
         self.assertEqual(result["answer_map"], {})
-        self.assertEqual(mocked.call_args.kwargs["max_tokens"], 8000)
+        self.assertIsNone(mocked.call_args.kwargs["max_tokens"])
+
+    def test_multi_paper_fallback_splits_repeated_writing_sections(self) -> None:
+        from backend.app.services.import_assist import infer_document_papers
+
+        blocks = [
+            "2019年6月第1套",
+            "Part I Writing (30 minutes)",
+            "Part II Listening Comprehension (30 minutes)",
+            "Part III Reading Comprehension (40 minutes)",
+            "2019年6月第2套",
+            "Part I Writing (30 minutes)",
+            "Part II Listening Comprehension (30 minutes)",
+            "Part III Reading Comprehension (40 minutes)",
+            "2019年6月第3套",
+            "Part I Writing (30 minutes)",
+            "Part IV Translation (30 minutes)",
+        ]
+
+        papers = infer_document_papers(
+            blocks,
+            "2019年06月六级真题全3套.docx",
+        )
+
+        self.assertEqual(len(papers), 3)
+        self.assertEqual([paper["set_number"] for paper in papers], [1, 2, 3])
+        self.assertTrue(papers[0]["has_objective_questions"])
+        self.assertFalse(papers[2]["has_objective_questions"])
+
+    def test_upload_only_creates_first_paper_from_multi_paper_document(self) -> None:
+        from backend.app.routers import imports as imports_router
+
+        blocks = [
+            "2019年6月第1套",
+            "Part I Writing (30 minutes)",
+            "Part II Listening Comprehension (30 minutes)",
+            "Part III Reading Comprehension (40 minutes)",
+            "2019年6月第2套",
+            "Part I Writing (30 minutes)",
+            "Part II Listening Comprehension (30 minutes)",
+            "Part III Reading Comprehension (40 minutes)",
+            "2019年6月第3套",
+            "Part I Writing (30 minutes)",
+            "Part II Listening Comprehension (30 minutes)",
+            "Part III Reading Comprehension (40 minutes)",
+        ]
+        with (
+            patch.object(imports_router, "extract_blocks", return_value=(blocks, {}, None)),
+            patch.object(imports_router, "create_docx_block_fragment"),
+            patch.object(imports_router, "parse_exam", return_value=self._minimal_draft()),
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files={
+                    "file": (
+                        "2019年06月六级真题全3套.docx",
+                        io.BytesIO(b"paper"),
+                        "application/octet-stream",
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["split_count"], 1)
+        self.assertEqual(body["detected_paper_count"], 3)
+        self.assertEqual(body["ignored_paper_count"], 2)
+        self.assertEqual(len(body["split_jobs"]), 1)
+        self.assertEqual(body["draft"]["document_split"]["paper_index"], 1)
+        self.assertEqual(body["draft"]["document_split"]["paper_count"], 1)
+        self.assertEqual(body["draft"]["document_split"]["ignored_paper_count"], 2)
+
+    def test_paper_without_objective_questions_cannot_be_published(self) -> None:
+        from backend.app.database import connect
+
+        draft = self._minimal_draft()
+        draft["document_split"] = {
+            "paper_index": 3,
+            "paper_count": 3,
+            "has_objective_questions": False,
+        }
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO import_jobs
+                    (filename, stored_path, detected_year, detected_format,
+                     status, draft_data, warnings)
+                VALUES (?, ?, ?, ?, 'draft', ?, '[]')
+                """,
+                (
+                    "writing-only.docx",
+                    "writing-only.docx",
+                    2020,
+                    "docx",
+                    json.dumps(draft, ensure_ascii=False),
+                ),
+            )
+            job_id = cursor.lastrowid
+            connection.commit()
+
+        response = self.client.post(f"/api/imports/{job_id}/publish")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("未检测到客观题", response.json()["detail"])
 
     def test_model_assist_applies_safe_number_map_and_moves_answers(self) -> None:
         from backend.app.services.import_assist import apply_model_assist
@@ -668,6 +791,35 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertIn("second answers", context["answer_text"])
         self.assertIn("third answers", context["answer_text"])
         self.assertEqual(len(context["answer_paths"]), 3)
+
+    def test_split_answer_text_filters_year_month_and_set(self) -> None:
+        from backend.app.routers.imports import _answer_text_for_split
+
+        answer_text = "\n\n".join(
+            [
+                "===== answer attachment: 2018.12英语六级解析第1套.pdf =====\nold",
+                "===== answer attachment: 2019.06英语六级解析第1套.pdf =====\nwanted",
+                "===== answer attachment: 2019.06英语六级解析第2套.pdf =====\nother-set",
+                "===== answer attachment: 2020.06英语六级解析第1套.pdf =====\nother-year",
+            ]
+        )
+
+        filtered = _answer_text_for_split(
+            answer_text,
+            {"year": 2019, "month": 6, "set_number": 1},
+        )
+
+        self.assertIn("wanted", filtered)
+        self.assertNotIn("old", filtered)
+        self.assertNotIn("other-set", filtered)
+        self.assertNotIn("other-year", filtered)
+        self.assertEqual(
+            _answer_text_for_split(
+                answer_text,
+                {"year": 2021, "month": 6, "set_number": 3},
+            ),
+            "",
+        )
 
 
 if __name__ == "__main__":

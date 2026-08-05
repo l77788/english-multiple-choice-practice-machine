@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import time
@@ -16,6 +17,8 @@ from ..database import get_active_profile_id, get_db
 from ..schemas import DraftUpdate, ImportAnswersUpdate, ModelAssistRequest
 from ..services.docx_parser import (
     apply_answers_to_draft,
+    create_docx_block_fragment,
+    extract_blocks,
     find_companion_answer_pdf,
     objective_question_numbers,
     parse_exam,
@@ -24,8 +27,10 @@ from ..services.docx_parser import (
 )
 from ..services.import_assist import (
     apply_model_assist,
+    detect_document_papers,
     document_text,
     extract_attachment_text,
+    infer_document_papers,
     run_model_assist,
 )
 from ..services.ai_client import get_ai_profile
@@ -33,7 +38,7 @@ from ..services.trash import trash_import_job
 
 
 router = APIRouter(prefix="/imports", tags=["imports"])
-IMPORT_PIPELINE_REVISION = "word-import-2026.08.04.3"
+IMPORT_PIPELINE_REVISION = "word-import-2026.08.05.multi-paper.1"
 
 
 def _job_scope_payload(parse_context: str | None) -> dict[str, Any]:
@@ -63,6 +68,186 @@ def _model_identity(
         model.strip() or str(profile.get("default_model", "")).strip()
     )
     return str(profile.get("name", "")).strip(), selected_model
+
+
+def _extract_answer_text(
+    stored_answer_paths: list[Path],
+    selected_answer_files: list[UploadFile],
+) -> str:
+    if len(stored_answer_paths) == 1:
+        return extract_attachment_text(stored_answer_paths[0])
+    answer_sections: list[str] = []
+    for index, attachment_path in enumerate(stored_answer_paths):
+        attachment_name = selected_answer_files[index].filename or attachment_path.name
+        extracted = extract_attachment_text(attachment_path)
+        if extracted.strip():
+            answer_sections.append(
+                f"===== answer attachment: {attachment_name} =====\n{extracted}"
+            )
+    return "\n\n".join(answer_sections)
+
+
+def _answer_text_for_split(answer_text: str, split_info: dict[str, Any]) -> str:
+    """Keep only answer attachments that belong to the current exam and set."""
+    if "===== answer attachment:" not in answer_text:
+        return answer_text
+    year = int(split_info.get("year") or 0)
+    month = int(split_info.get("month") or 0)
+    set_number = int(split_info.get("set_number") or 0)
+    sections = re.split(r"(?=^===== answer attachment:)", answer_text, flags=re.M)
+    selected: list[str] = []
+    for section in sections:
+        header = section.splitlines()[0] if section.splitlines() else ""
+        header_year = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", header)
+        header_month = re.search(
+            r"(?:年|[.\-_])\s*(0?[1-9]|1[0-2])\s*月?",
+            header,
+        )
+        header_set = re.search(r"第\s*([一二三1-9])\s*套", header)
+        if year and header_year and int(header_year.group(1)) != year:
+            continue
+        if month and header_month and int(header_month.group(1)) != month:
+            continue
+        if set_number and header_set:
+            set_token = header_set.group(1)
+            parsed_set = (
+                int(set_token)
+                if set_token.isdigit()
+                else {"一": 1, "二": 2, "三": 3}.get(set_token, 0)
+            )
+            if parsed_set != set_number:
+                continue
+        selected.append(section)
+    return "\n\n".join(selected)
+
+
+def _build_uploaded_draft(
+    connection: sqlite3.Connection,
+    *,
+    source_path: Path,
+    source_name: str,
+    primary_answer_path: Path | None,
+    selected_answer_files: list[UploadFile],
+    stored_answer_paths: list[Path],
+    audio_paths: list[Path],
+    use_model_assist: bool,
+    defer_model_assist: bool,
+    model_assist_correct_structure: bool,
+    answer_text: str,
+    split_info: dict[str, Any],
+    split_source: str,
+    split_error: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    started = time.perf_counter()
+    diagnostics: dict[str, Any] = {
+        "pipeline_revision": IMPORT_PIPELINE_REVISION,
+        "use_model_assist_requested": use_model_assist,
+        "structure_fix_requested": model_assist_correct_structure,
+        "answer_file_received": bool(selected_answer_files),
+        "answer_file_count": len(selected_answer_files),
+        "answer_file_name": selected_answer_files[0].filename if selected_answer_files else "",
+        "answer_file_names": [item.filename for item in selected_answer_files if item.filename],
+        "model_call_status": (
+            "deferred"
+            if use_model_assist and defer_model_assist
+            else "pending"
+            if use_model_assist
+            else "not_requested"
+        ),
+        "split_source": split_source,
+        "split_error": split_error,
+        "paper_index": int(split_info.get("paper_index", 1)),
+        "paper_count": int(split_info.get("paper_count", 1)),
+        "has_objective_questions": bool(
+            split_info.get("has_objective_questions", True)
+        ),
+    }
+    local_started = time.perf_counter()
+    draft = parse_exam(
+        source_path,
+        answer_path=primary_answer_path,
+        source_name=source_name,
+        answer_name=selected_answer_files[0].filename if selected_answer_files else None,
+        audio_paths=audio_paths or None,
+    )
+    draft["title"] = str(split_info.get("title") or draft.get("title") or source_name)
+    if split_info.get("year"):
+        draft["year"] = int(split_info["year"])
+    if split_info.get("month"):
+        draft["exam_month"] = int(split_info["month"])
+    if split_info.get("set_number"):
+        draft["set_number"] = int(split_info["set_number"])
+    draft["document_split"] = {
+        key: value
+        for key, value in split_info.items()
+        if key not in {"paper_index", "paper_count"}
+    } | {
+        "paper_index": int(split_info.get("paper_index", 1)),
+        "paper_count": int(split_info.get("paper_count", 1)),
+        "source": split_source,
+    }
+    if not split_info.get("has_objective_questions", True):
+        draft["warnings"] = [
+            "该套文档未检测到可导入的客观题，可能只包含写作或翻译部分"
+        ]
+    diagnostics.update(
+        {
+            "local_parse_elapsed_ms": round((time.perf_counter() - local_started) * 1000),
+            "local_answer_count": sum(1 for value in draft.get("answers", {}).values() if value),
+            "local_unit_count": len(draft.get("units", [])),
+            "local_warning_count": len(draft.get("warnings", [])),
+            "answer_text_chars": len(answer_text),
+        }
+    )
+    parse_context: dict[str, Any] = {
+        "answer_text": answer_text,
+        "answer_paths": [str(path) for path in stored_answer_paths],
+        "audio_paths": [str(path) for path in audio_paths],
+        "import_diagnostics": diagnostics,
+        "document_split": draft["document_split"],
+    }
+    draft["import_diagnostics"] = diagnostics
+    if use_model_assist and not defer_model_assist and split_info.get(
+        "has_objective_questions", True
+    ):
+        model_started = time.perf_counter()
+        diagnostics["model_call_status"] = "running"
+        diagnostics["model_call_started_at"] = datetime.now().isoformat(timespec="seconds")
+        try:
+            profile_name, model_name = _model_identity(connection)
+            diagnostics["model_profile_name"] = profile_name
+            diagnostics["model_name"] = model_name
+            result, _ = run_model_assist(
+                connection,
+                draft,
+                document_text(source_path),
+                answer_text=answer_text,
+                correct_structure=model_assist_correct_structure,
+            )
+            draft = apply_model_assist(
+                draft,
+                result,
+                model_name=model_name,
+                correct_structure=model_assist_correct_structure,
+            )
+            draft["model_assist"]["phase"] = "upload"
+            diagnostics["model_call_status"] = "completed"
+        except Exception as error:
+            diagnostics["model_call_status"] = "failed"
+            diagnostics["model_error"] = str(error)[:400]
+            draft["model_assist"] = {
+                "status": "failed",
+                "phase": "upload",
+                "error": str(error)[:400],
+                "fell_back_to_local": True,
+            }
+        diagnostics["model_call_elapsed_ms"] = round(
+            (time.perf_counter() - model_started) * 1000
+        )
+    diagnostics["total_elapsed_ms"] = round((time.perf_counter() - started) * 1000)
+    draft["import_diagnostics"] = diagnostics
+    parse_context["import_diagnostics"] = diagnostics
+    return draft, parse_context
 
 
 @router.get("")
@@ -146,167 +331,152 @@ async def upload_import(
             shutil.copyfileobj(selected_answer.file, target)
         stored_answer_paths.append(stored_answer_path)
     primary_answer_path = stored_answer_paths[0] if stored_answer_paths else None
-    parse_context: dict[str, Any] = {}
-    diagnostics: dict[str, Any] = {
-        "pipeline_revision": IMPORT_PIPELINE_REVISION,
-        "use_model_assist_requested": use_model_assist,
-        "structure_fix_requested": model_assist_correct_structure,
-        "answer_file_received": bool(selected_answer_files),
-        "answer_file_count": len(selected_answer_files),
-        "answer_file_name": (
-            selected_answer_files[0].filename if selected_answer_files else ""
-        ),
-        "answer_file_names": [
-            item.filename for item in selected_answer_files if item.filename
-        ],
-        "model_call_status": (
-            "deferred"
-            if use_model_assist and defer_model_assist
-            else "pending"
-            if use_model_assist
-            else "not_requested"
-        ),
-    }
     try:
-        local_started = time.perf_counter()
-        draft = parse_exam(
-            stored_path,
-            answer_path=primary_answer_path,
-            source_name=file.filename,
-            answer_name=(
-                selected_answer_files[0].filename if selected_answer_files else None
-            ),
-            audio_paths=audio_paths if audio_paths else None,
-        )
-        diagnostics.update(
-            {
-                "local_parse_elapsed_ms": round(
-                    (time.perf_counter() - local_started) * 1000
-                ),
-                "local_answer_count": sum(
-                    1 for value in draft.get("answers", {}).values() if value
-                ),
-                "local_unit_count": len(draft.get("units", [])),
-                "local_warning_count": len(draft.get("warnings", [])),
-            }
-        )
-        answer_text = ""
-        if len(stored_answer_paths) == 1:
-            answer_text = extract_attachment_text(stored_answer_paths[0])
-        elif stored_answer_paths:
-            answer_sections = []
-            for index, attachment_path in enumerate(stored_answer_paths):
-                attachment_name = (
-                    selected_answer_files[index].filename or attachment_path.name
-                )
-                extracted = extract_attachment_text(attachment_path)
-                if extracted.strip():
-                    answer_sections.append(
-                        f"===== answer attachment: {attachment_name} =====\n{extracted}"
-                    )
-            answer_text = "\n\n".join(answer_sections)
-        elif not draft.get("answers"):
-            companion = find_companion_answer_pdf(stored_path, draft.get("year"))
-            if companion:
-                answer_text = extract_attachment_text(companion)
-        parse_context["answer_text"] = answer_text[:80000]
-        if stored_answer_paths:
-            parse_context["answer_paths"] = [
-                str(path) for path in stored_answer_paths
-            ]
-        if audio_paths:
-            parse_context["audio_paths"] = [str(p) for p in audio_paths]
-        diagnostics["answer_text_chars"] = len(parse_context["answer_text"])
-        draft["import_diagnostics"] = diagnostics
-        if use_model_assist and not defer_model_assist:
-            model_started = time.perf_counter()
-            diagnostics["model_call_status"] = "running"
-            diagnostics["model_call_started_at"] = datetime.now().isoformat(
-                timespec="seconds"
-            )
+        answer_text = _extract_answer_text(stored_answer_paths, selected_answer_files)
+        split_source = "local"
+        split_error = ""
+        try:
+            blocks, _, converted = extract_blocks(stored_path)
             try:
-                profile_name, model_name = _model_identity(connection)
-                diagnostics["model_profile_name"] = profile_name
-                diagnostics["model_name"] = model_name
-                result, _ = run_model_assist(
-                    connection,
-                    draft,
-                    document_text(stored_path),
-                    answer_text=answer_text,
-                    correct_structure=model_assist_correct_structure,
-                )
-                draft = apply_model_assist(
-                    draft,
-                    result,
-                    model_name=model_name,
-                    correct_structure=model_assist_correct_structure,
-                )
-                draft["model_assist"]["phase"] = "upload"
-                diagnostics["model_call_status"] = "completed"
-                diagnostics["model_call_elapsed_ms"] = round(
-                    (time.perf_counter() - model_started) * 1000
-                )
-                if not draft.get("answers_confirmed"):
-                    draft["answer_status"] = {
-                        "status": "parsed",
-                        "message": (
-                            f"模型辅助解析识别 {draft['model_assist']['answer_total']} 道答案，"
-                            "发布前请人工核对"
-                        ),
-                    }
-            except Exception as error:
-                diagnostics["model_call_status"] = "failed"
-                diagnostics["model_call_elapsed_ms"] = round(
-                    (time.perf_counter() - model_started) * 1000
-                )
-                diagnostics["model_error"] = str(error)[:400]
-                draft["model_assist"] = {
-                    "status": "failed",
-                    "phase": "upload",
-                    "error": str(error)[:400],
-                    "fell_back_to_local": True,
+                paper_sections = infer_document_papers(blocks, file.filename)
+                if use_model_assist:
+                    try:
+                        paper_sections, _ = detect_document_papers(
+                            connection,
+                            blocks,
+                            file.filename,
+                        )
+                        split_source = "model"
+                    except Exception as error:
+                        split_error = str(error)[:400]
+            finally:
+                if converted:
+                    shutil.rmtree(converted.parent, ignore_errors=True)
+        except Exception as error:
+            # Preserve the established single-paper error semantics: the
+            # parser below remains the source of truth for invalid documents.
+            # This also keeps older API clients/tests that provide a parser
+            # adapter but no OOXML block extractor working.
+            split_error = str(error)[:400]
+            paper_sections = [
+                {
+                    "title": Path(file.filename).stem,
+                    "year": None,
+                    "month": None,
+                    "set_number": 1,
+                    "start_block": 0,
+                    "end_block": 0,
+                    "objective_start_block": 0,
+                    "objective_end_block": 0,
+                    "has_objective_questions": True,
                 }
-        diagnostics["total_elapsed_ms"] = round(
+            ]
+
+        variants: list[tuple[Path, str, dict[str, Any]]] = []
+        detected_paper_count = len(paper_sections)
+        ignored_paper_count = max(0, detected_paper_count - 1)
+        section = paper_sections[0]
+        info = dict(section)
+        info["paper_index"] = 1
+        info["paper_count"] = 1
+        info["detected_paper_count"] = detected_paper_count
+        info["ignored_paper_count"] = ignored_paper_count
+        if detected_paper_count > 1:
+            fragment_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.docx"
+            create_docx_block_fragment(
+                stored_path,
+                fragment_path,
+                start_block=int(section["start_block"]),
+                end_block=int(section["end_block"]),
+            )
+            variants.append(
+                (
+                    fragment_path,
+                    f"{section['title']}.docx",
+                    info,
+                )
+            )
+        else:
+            variants.append((stored_path, file.filename, info))
+
+        import_group_id = uuid.uuid4().hex
+        created_jobs: list[dict[str, Any]] = []
+        for index, (variant_path, variant_name, split_info) in enumerate(variants):
+            variant_audio_paths = [audio_paths[0]] if audio_paths else []
+            variant_answer_text = _answer_text_for_split(answer_text, split_info)
+            draft, parse_context = _build_uploaded_draft(
+                connection,
+                source_path=variant_path,
+                source_name=variant_name,
+                primary_answer_path=primary_answer_path,
+                selected_answer_files=selected_answer_files,
+                stored_answer_paths=stored_answer_paths,
+                audio_paths=variant_audio_paths,
+                use_model_assist=use_model_assist,
+                defer_model_assist=defer_model_assist,
+                model_assist_correct_structure=model_assist_correct_structure,
+                answer_text=variant_answer_text,
+                split_info=split_info,
+                split_source=split_source,
+                split_error=split_error,
+            )
+            parse_context["import_group_id"] = import_group_id
+            parse_context["source_container_path"] = str(stored_path)
+            cursor = connection.execute(
+                """
+                INSERT INTO import_jobs
+                    (profile_id, filename, stored_path, answer_stored_path,
+                     detected_year, detected_format, status, draft_data,
+                     warnings, parse_context)
+                VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+                """,
+                (
+                    selected_profile_id,
+                    variant_name,
+                    str(variant_path),
+                    str(primary_answer_path or ""),
+                    draft.get("year"),
+                    draft.get("detected_format"),
+                    json.dumps(draft, ensure_ascii=False),
+                    json.dumps(draft["warnings"], ensure_ascii=False),
+                    json.dumps(parse_context, ensure_ascii=False),
+                ),
+            )
+            created_jobs.append(
+                {
+                    "id": int(cursor.lastrowid),
+                    "filename": variant_name,
+                    "draft": draft,
+                    "warnings": draft["warnings"],
+                    "model_assist": draft.get("model_assist"),
+                    "profile_id": selected_profile_id,
+                    "paper_index": split_info["paper_index"],
+                    "paper_count": split_info["paper_count"],
+                    "has_objective_questions": split_info.get(
+                        "has_objective_questions", True
+                    ),
+                }
+            )
+        connection.commit()
+        first = dict(created_jobs[0])
+        first["split_jobs"] = created_jobs
+        first["split_count"] = len(created_jobs)
+        first["detected_paper_count"] = detected_paper_count
+        first["ignored_paper_count"] = ignored_paper_count
+        first["split_source"] = split_source
+        first["split_error"] = split_error
+        first["total_elapsed_ms"] = round(
             (time.perf_counter() - import_started) * 1000
         )
-        draft["import_diagnostics"] = diagnostics
-        parse_context["import_diagnostics"] = diagnostics
+        return first
     except Exception as error:
+        connection.rollback()
         stored_path.unlink(missing_ok=True)
         for stored_answer_path in stored_answer_paths:
             stored_answer_path.unlink(missing_ok=True)
         for audio_path in audio_paths:
             audio_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Word解析失败：{error}") from error
-    cursor = connection.execute(
-        """
-        INSERT INTO import_jobs
-            (profile_id, filename, stored_path, answer_stored_path,
-             detected_year, detected_format, status, draft_data,
-             warnings, parse_context)
-        VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
-        """,
-        (
-            selected_profile_id,
-            file.filename,
-            str(stored_path),
-            str(primary_answer_path or ""),
-            draft.get("year"),
-            draft.get("detected_format"),
-            json.dumps(draft, ensure_ascii=False),
-            json.dumps(draft["warnings"], ensure_ascii=False),
-            json.dumps(parse_context, ensure_ascii=False),
-        ),
-    )
-    connection.commit()
-    return {
-        "id": cursor.lastrowid,
-        "filename": file.filename,
-        "draft": draft,
-        "warnings": draft["warnings"],
-        "model_assist": draft.get("model_assist"),
-        "profile_id": selected_profile_id,
-    }
 
 
 @router.post("/{job_id}/model-assist")
@@ -545,7 +715,7 @@ def update_answers(
             raise HTTPException(422, f"无效题号：{number}")
         if normalized_number not in allowed_numbers:
             raise HTTPException(422, f"第 {normalized_number} 题不属于当前客观题草稿")
-        if normalized_answer and normalized_answer not in "ABCDEFGHT":
+        if normalized_answer and normalized_answer not in "ABCDEFGHIJKLMNOT":
             raise HTTPException(422, f"第 {normalized_number} 题答案无效")
         draft.setdefault("answers", {})[normalized_number] = normalized_answer
         if normalized_answer:
@@ -619,6 +789,8 @@ def publish(
     if row is None:
         raise HTTPException(404, "导入任务不存在")
     draft = json.loads(row["draft_data"])
+    if draft.get("document_split", {}).get("has_objective_questions") is False:
+        raise HTTPException(409, "该套文档未检测到客观题，不能发布为空壳题库")
     warnings = validate_draft(draft)
     if warnings and not force:
         raise HTTPException(409, {"message": "仍有校验问题", "warnings": warnings})

@@ -302,27 +302,46 @@ async function upload() {
   form.append('defer_model_assist', useModelAssist.value ? 'true' : 'false')
   try {
     current.value = await api('/imports', { method: 'POST', body: form })
+    const splitJobs: any[] = current.value.split_jobs?.length
+      ? current.value.split_jobs : [current.value]
     let assist = current.value.model_assist
     if (useModelAssist.value) {
-      uploadStage.value = '本地草稿已建立，正在调用模型辅助校对'
-      const result: any = await post(`/imports/${current.value.id}/model-assist`, {
-        profile_id: null,
-        model: '',
-        correct_structure: modelAssistRewrite.value,
-      })
-      current.value.draft = result.draft
-      current.value.warnings = result.warnings
-      current.value.model_assist = result.model_assist
-      assist = result.model_assist
+      let completed = 0
+      for (const job of splitJobs) {
+        if (job.has_objective_questions === false) continue
+        uploadStage.value = splitJobs.length > 1
+          ? `已拆分 ${splitJobs.length} 套，正在校对第 ${job.paper_index || completed + 1} 套`
+          : '本地草稿已建立，正在调用模型辅助校对'
+        const result: any = await post(`/imports/${job.id}/model-assist`, {
+          profile_id: null,
+          model: '',
+          correct_structure: modelAssistRewrite.value,
+        })
+        job.draft = result.draft
+        job.warnings = result.warnings
+        job.model_assist = result.model_assist
+        completed += 1
+        if (job.id === current.value.id) {
+          current.value.draft = result.draft
+          current.value.warnings = result.warnings
+          current.value.model_assist = result.model_assist
+          assist = result.model_assist
+        }
+      }
     }
     if (assist?.status === 'failed') {
       assistError.value = assist.error || '未知错误'
       assistDialogOpen.value = true
       showModelSelector.value = false
     } else if (assist?.status === 'applied') {
-      notice.value = `模型辅助解析完成：核对 ${assist.applied_answers} 道答案，发现 ${assist.issue_count} 个结构问题，请核对后发布`
+      const firstPaperNotice = current.value.ignored_paper_count > 0
+        ? `文档共检测到 ${current.value.detected_paper_count} 套，仅导入第 1 套，其余 ${current.value.ignored_paper_count} 套已忽略。`
+        : ''
+      notice.value = `${firstPaperNotice}模型辅助解析完成：核对 ${assist.applied_answers} 道答案，发现 ${assist.issue_count} 个结构问题，请核对后发布`
     } else {
-      notice.value = '本地解析完成；本次未请求模型辅助校对'
+      notice.value = current.value.ignored_paper_count > 0
+        ? `文档共检测到 ${current.value.detected_paper_count} 套；本地仅生成第 1 套草稿，其余 ${current.value.ignored_paper_count} 套已忽略`
+        : '本地解析完成；本次未请求模型辅助校对'
     }
     bulkAnswers.value = {}
     await loadJobs()
@@ -427,7 +446,7 @@ function updateCandidate(unit: any, key: string, value: string) {
 }
 
 function applyBulkAnswers(unit: any) {
-  const letters = String(bulkAnswers.value[unit.title] || '').toUpperCase().match(/[A-HT]/g) || []
+  const letters = String(bulkAnswers.value[unit.title] || '').toUpperCase().match(/[A-OT]/g) || []
   if (letters.length !== unit.questions.length) {
     error.value = `${unit.title} 需要输入 ${unit.questions.length} 个答案，当前识别到 ${letters.length} 个`
     return

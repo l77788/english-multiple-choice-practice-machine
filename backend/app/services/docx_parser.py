@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import re
 import shutil
 import subprocess
@@ -26,7 +27,7 @@ OPTION_MARK_RE = re.compile(
 )
 QUESTION_NUMBER_RE = re.compile(r"^\s*([1-5]?\d)\s*[\.．、)]\s*(.+)$", re.S)
 TEXT_MARK_RE = re.compile(r"^\s*Text\s*([1-4lI])\s*$", re.I)
-ANSWER_SYMBOL_RE = r"(?:[A-H]|T)"
+ANSWER_SYMBOL_RE = r"(?:[A-O]|T)"
 INVISIBLE_TEXT_RE = re.compile(
     r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\ue000-\uf8ff]"
 )
@@ -223,6 +224,74 @@ def extract_blocks(path: Path) -> tuple[list[str], str, Path | None]:
     return blocks, detected, converted
 
 
+def create_docx_block_fragment(
+    source: Path,
+    destination: Path,
+    *,
+    start_block: int,
+    end_block: int,
+) -> None:
+    """Copy an OOXML document while retaining only a visible block range.
+
+    ``start_block`` and ``end_block`` use the same zero-based, inclusive
+    indexes returned by :func:`extract_blocks`.  Section properties are kept
+    so Word and the local parser can still open the generated fragment.
+    """
+    detected = detect_format(source)
+    converted: Path | None = None
+    parse_path = source
+    if detected == "legacy_doc":
+        converted = _convert_legacy(source)
+        parse_path = converted
+    if detected == "text_pdf":
+        raise ValueError("PDF 多套拆分暂不支持生成 Word 片段")
+    if start_block < 0 or end_block < start_block:
+        raise ValueError("试卷拆分边界无效")
+    try:
+        with zipfile.ZipFile(parse_path) as archive:
+            root = etree.fromstring(archive.read("word/document.xml"))
+            body = root.find("w:body", namespaces=NS)
+            if body is None:
+                raise ValueError("Word 文档缺少正文")
+            visible_index = -1
+            retained: list[etree._Element] = []
+            for child in list(body):
+                if child.tag == f"{{{NS['w']}}}sectPr":
+                    retained.append(copy.deepcopy(child))
+                    continue
+                text = clean_text(_extract_ooxml_text(child))
+                if text and not PAGE_FOOTER_RE.search(text):
+                    visible_index += 1
+                    if start_block <= visible_index <= end_block:
+                        retained.append(copy.deepcopy(child))
+            if not retained or all(
+                child.tag == f"{{{NS['w']}}}sectPr" for child in retained
+            ):
+                raise ValueError("拆分边界没有包含可见正文")
+            for child in list(body):
+                body.remove(child)
+            for child in retained:
+                body.append(child)
+            document_xml = etree.tostring(
+                root,
+                xml_declaration=True,
+                encoding="UTF-8",
+                standalone=True,
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as output:
+                for item in archive.infolist():
+                    data = (
+                        document_xml
+                        if item.filename == "word/document.xml"
+                        else archive.read(item.filename)
+                    )
+                    output.writestr(item, data)
+    finally:
+        if converted:
+            shutil.rmtree(converted.parent, ignore_errors=True)
+
+
 def _find_index(blocks: list[str], pattern: str, start: int = 0) -> int:
     rx = re.compile(pattern, re.I)
     for index in range(start, len(blocks)):
@@ -400,15 +469,15 @@ def _extract_answers_from_text(text: str) -> dict[int, str]:
         re.I,
     ):
         numeric = int(number)
-        if 1 <= numeric <= 45:
+        if 1 <= numeric <= 55:
             answers[numeric] = letter.upper()
 
     range_pattern = re.compile(
         r"(?:Text\s*[1-4]\s*|(?<![A-Za-z0-9]))"
-        r"([1-4]?\d)\s*[-~～至–—]\s*([1-4]?\d)\s*[:：]?\s*"
+        r"([1-5]?\d)\s*[-~～至–—]\s*([1-5]?\d)\s*[:：]?\s*"
         r"(.*?)"
-        r"(?=Text\s*[1-4]\s*[1-4]?\d\s*[-~～至–—]\s*[1-4]?\d"
-        r"|(?<![A-Za-z0-9])[1-4]?\d\s*[-~～至–—]\s*[1-4]?\d"
+        r"(?=Text\s*[1-4]\s*[1-5]?\d\s*[-~～至–—]\s*[1-5]?\d"
+        r"|(?<![A-Za-z0-9])[1-5]?\d\s*[-~～至–—]\s*[1-5]?\d"
         r"|Part\s+[BC]|Section\s+[ⅠⅡⅢIV1234]|$)",
         re.I | re.S,
     )
@@ -422,7 +491,7 @@ def _extract_answers_from_text(text: str) -> dict[int, str]:
 
     compact = re.sub(r"\s+", "", text).upper()
     for start, end, letters in re.findall(
-        rf"(?<!\d)([1-4]?\d)[-~～至–—]([1-4]?\d)[:：]?((?:{ANSWER_SYMBOL_RE}){{2,20}})",
+        rf"(?<!\d)([1-5]?\d)[-~～至–—]([1-5]?\d)[:：]?((?:{ANSWER_SYMBOL_RE}){{2,20}})",
         compact,
     ):
         first, last = int(start), int(end)
@@ -944,7 +1013,7 @@ def _parse_part_b(blocks: list[str], answers: dict[int, str]) -> dict[str, Any]:
     for text in section[len(direction_parts) :]:
         if _is_noise(text) or text == direction:
             continue
-        match = re.match(r"^\s*\[([A-H])\]\s*(.*)$", text, re.I | re.S)
+        match = re.match(r"^\s*\[([A-O])\]\s*(.*)$", text, re.I | re.S)
         if match:
             candidate_map[match.group(1).upper()] = clean_text(match.group(2))
         else:
