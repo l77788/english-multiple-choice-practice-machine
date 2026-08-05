@@ -32,7 +32,7 @@
 
 English Practice Machine is a Windows desktop app for learners who need sustained, high-volume practice with English objective questions (multiple-choice questions).
 
-It is not a closed application with one fixed set of questions. Users can continuously import, organize, export, and share question banks. The current experience is optimized for cloze tests, Reading Part A, and Part B tasks from the Chinese postgraduate entrance-exam English I syllabus, while the open question-bank format can support other English objective-question collections.
+It is not a closed application with one fixed set of questions. Users can continuously import, organize, export, and share question banks. The current build supports the main objective-question formats used by Chinese postgraduate English I/II and CET-4/CET-6, while the open bank format can be extended to other English exams.
 
 Users can connect a model through their own API endpoint. AI assistance can cover wrong-answer analysis, vocabulary translation and review, question-skill labeling, import-draft correction, and general English-learning questions. Complete API-profile and model-management controls let users choose between local and remote services instead of being tied to one provider.
 
@@ -56,19 +56,19 @@ Random practice selects complete units, options can be shuffled before each atte
 
 > Even with a limited set of questions, every new attempt should require reading, reasoning, and answering again—not simply recalling the correct option.
 
-The project is currently `v0.1.0-alpha / preparing for open source`. The main practice, wrong-answer, vocabulary, AI-assistant, and ESQ question-bank workflows are available. A portable build, public CI, and contributor documentation are still on the roadmap.
+The project is currently `v0.1.0-alpha / active development`. The main practice, wrong-answer, vocabulary, AI-assistant, model-assisted import, and ESQ sharing workflows are available. Portable releases, public CI, and additional exam templates are still being developed.
 
 ## Feature overview
 
 | Area | Available now |
 | --- | --- |
 | Home | Learning overview, dark mode, vocabulary review every five seconds, frequent-word priority, quick random practice |
-| Practice | Full-year papers, random complete units, cloze, Reading Part A, and multiple Part B variants |
+| Practice | Full-year papers, random complete units, postgraduate English I/II, CET listening/word bank/paragraph matching/reading |
 | Submission | Unit submission, paper submission, unanswered-question navigation, score/correct/wrong feedback |
-| Wrong answers | Year → unit navigation, year/unit redo and analysis, frequent-mistake tracking |
-| Vocabulary | Right-click capture from passages/stems/options, deferred batch translation, ordinary/context meanings, review states |
-| AI assistant | Multiple API profiles, multi-session chat, model synchronization, wrong-answer analysis, labels, and import correction suggestions |
-| Question bank | Word draft import, answer-PDF assistance, ESQ 1.0 import/export/preview/conflict replacement |
+| Wrong answers | Year → unit navigation, redo/analysis, frequent mistakes, cached reports, and retry-gated re-analysis |
+| Vocabulary | Right-click capture, translation after leaving practice, synonyms/antonyms/similar-form comparison |
+| AI assistant | Multiple API profiles, multi-session chat, model sync, wrong-answer analysis, labels, and draft correction |
+| Question bank | Multiple bank profiles, recycle bin, Word/PDF drafts, answer/audio attachments, ESQ 1.1, batch import |
 | Data | Local storage, folder backup, Windows DPAPI encryption for API keys |
 
 ## Features in detail
@@ -114,6 +114,13 @@ The first release includes:
 
 Cloze and Part B blanks use structured markers. The renderer aligns the number and underline as a single blank so the target position remains easy to find.
 
+#### Postgraduate English II and CET formats
+
+- Postgraduate English II supports T/F-style Part B questions while retaining complete-unit practice and stable-key grading.
+- CET-4/CET-6 support listening, word-bank cloze, paragraph matching, and detailed reading. Word-bank tasks use a passage plus a draggable A–O bank; paragraph matching uses a letter selector beside each statement.
+- Listening transcripts are never shown and listening questions are excluded from wrong-answer analysis. Audio plays as one continuous track and is submitted as one section.
+- With the timer enabled, seeking is locked; without the timer, the learner may seek freely. Exiting an unfinished listening section warns that the attempt will not be retained.
+
 #### Practice experience
 
 - Choose whether to shuffle options before starting.
@@ -142,6 +149,8 @@ Analysis follows a “do not translate the exam again” philosophy:
 
 Question labels can be generated in advance for skills, vocabulary demand, context dependency, traps, and attention points. Human-edited or locked labels are protected from later batch tasks.
 
+Analysis reports are cached locally. Re-analysis for the same unit is blocked until the learner completes another wrong-question retry; the next analysis then receives the previous wrong-choice snapshot for trend comparison.
+
 ### 4. Vocabulary book
 
 Right-click a selected word or a phrase of up to five words in a passage, stem, or option to add it to the vocabulary book.
@@ -149,8 +158,8 @@ Right-click a selected word or a phrase of up to five words in a passage, stem, 
 The important behavior is **no translation at capture time**:
 
 1. Save the word, original sentence, source year, unit, and occurrence record immediately.
-2. Submit translation jobs in batches when a unit is submitted, a whole paper is submitted, or practice is exited normally.
-3. Use a `keepalive` request when the page is closed unexpectedly; recover unfinished jobs on the next launch.
+2. Queue all pending words only when the learner leaves the practice page. Unit and paper submission do not start translation early.
+3. Route changes, page hiding, and application backgrounding trigger reliable queueing; unfinished queued jobs recover on the next launch.
 4. Show `queued`, `translating`, `ready`, or `failed` translation states.
 
 The vocabulary book provides:
@@ -160,6 +169,7 @@ The vocabulary book provides:
 - Cumulative occurrence count; two or more captures automatically receive the `🌟` frequent-word marker.
 - Manual priority flag, search, filters, edit, delete, and retry translation.
 - “Today’s review” states: Don’t know / Somewhat familiar / Mastered.
+- Global display controls for synonyms, antonyms, and similarly spelled words. Similar forms prefer local vocabulary-book matching, while the model adds only natural relationships.
 - Completed or manually edited meanings are never silently overwritten by automatic translation.
 
 ### 5. AI learning assistant and model settings
@@ -170,6 +180,7 @@ Model-management features:
 
 - Store multiple API profiles.
 - Configure a name, endpoint, API key, default model, and maximum output tokens.
+- Configure Temperature; the UI recommends lower values for grading, labeling, and structured imports, and larger output budgets for long-document review.
 - Enable/disable profiles and decide whether each model appears in the selector.
 - Automatically fetch available models; Ollama-compatible services have an `/api/tags` fallback.
 - Test connectivity and switch models inside a chat.
@@ -183,7 +194,7 @@ AI-assisted workflows include:
 - Batch translation for vocabulary entries.
 - Frequent-wrong-answer analysis with category ratios and review advice.
 - Pre-labeling question skills and traps.
-- Correction suggestions for Word-import drafts.
+- Answer verification, question-number remapping, and optional stem/option ownership correction for Word/PDF drafts.
 
 Safety boundaries:
 
@@ -191,26 +202,45 @@ Safety boundaries:
 - API keys are encrypted with Windows DPAPI before being stored in the local database.
 - Only content explicitly submitted by the user is sent to the selected remote model: chat messages, vocabulary context, wrong-answer material, or draft-question text. Choose a provider according to its retention and privacy policy.
 
-### 6. Word question-bank import
+### 6. Question-bank profiles, recycle bin, and batch management
 
-The “Import question bank” page accepts `.docx` and `.doc` files:
+- Create separate bank profiles for different exams and switch the active profile from Home, Library, or Import.
+- The same profile may contain multiple papers for the same year; every import explicitly targets one profile.
+- Long-press a paper to enter multi-select mode, then move selected papers to another profile or the recycle bin.
+- Deleted papers, non-empty profiles, and unfinished import drafts remain in one recycle bin for seven days and can be restored or permanently removed.
+- Wrong answers follow the active bank profile. Vocabulary remains shared across profiles, with recently added entries prioritized.
 
-1. Parse the document into a draft.
-2. Check passages, stems, options, answers, and unit ownership.
-3. Review and correct the draft.
-4. Publish only after validation passes.
+### 7. Word / PDF question-bank import
 
-AI may produce draft-correction suggestions, but never silently rewrites the published bank. Legacy `.doc` conversion uses Microsoft Word COM on the local machine; `.docx` is recommended.
+The “Import question bank” page accepts `.docx`, `.doc`, and text-based `.pdf` papers:
 
-When a Word file does not contain answers, place the answer PDF for the same year in the same folder so the import flow can assist with matching. Answers should still be checked before publishing.
+1. Select the target bank profile, paper, one or more answer attachments, and optional listening audio (MP3/M4A/WAV/OGG).
+2. Build a local draft and optionally run full-model verification for question boundaries, answer mapping, and question-number alignment.
+3. Edit metadata, passages, stems, options, answer sources, and Part B candidates in a field-by-field visual reviewer.
+4. Publish only after validation, then optionally start AI labeling for the newly imported paper. Listening questions are excluded from labeling.
 
-### 7. ESQ 1.0 sharing format
+If model assistance fails, the local draft remains available for manual review or retry with another model. The model edits only the draft; publishing still requires explicit approval. Legacy `.doc` conversion uses Microsoft Word COM on the local machine, so `.docx` is recommended.
+
+When the paper has no embedded key, upload DOC/DOCX/PDF answer attachments. If no answer can be extracted, save the questions first and enter answers manually. Scanned or heavily watermarked PDFs without a reliable text layer are rejected with an OCR/manual-processing message.
+
+The public importer accepts one paper per import. A confirmation dialog appears before processing; if one file contains multiple complete papers, only the first draft is generated and later papers are ignored to prevent cross-paper misalignment.
+
+For large local collections, use the resumable batch tool:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\batch_import.py --help
+```
+
+It supports discovery, answer/audio pairing, full-model verification, retry with backoff, resume state, and content-hash deduplication. Validate a small sample before a large run.
+
+### 8. ESQ 1.1 sharing format
 
 `.esq` is a shareable question-bank package made of a ZIP archive and UTF-8 JSON. It is designed to move a bank between users without relying on local SQLite IDs.
 
 Format highlights:
 
 - One package may contain multiple years.
+- ESQ 1.1 adds exam type, month, set number, and listening-track metadata while remaining backward-compatible with ESQ 1.0.
 - Stable `packageId`, `paperKey`, `unitKey`, and `questionKey`.
 - Standard answers included by default.
 - Optional AI labels.
@@ -349,7 +379,7 @@ frontend/
     views/         # home, practice, wrong answers, vocabulary, settings
 docs/              # question-bank format and schema
 examples/          # shareable package examples
-tools/             # validators
+tools/             # validators and resumable batch importer
 tests/             # backend and format tests
 ```
 
@@ -366,7 +396,7 @@ cd frontend
 corepack pnpm run build
 ```
 
-The latest local check recorded 41 backend tests passing and a successful production frontend build. Full-corpus integration tests are explicitly enabled through the `ENGLISH_PRACTICE_CORPUS` environment variable and skip automatically when a private corpus is unavailable. GitHub Actions CI is still being prepared.
+The latest local check recorded 76 backend tests passing, one private full-corpus test skipped by environment, and a successful production frontend build. Full-corpus integration tests are explicitly enabled through the `ENGLISH_PRACTICE_CORPUS` environment variable and skip automatically when a private corpus is unavailable. GitHub Actions CI is still being prepared.
 
 ## Status and roadmap
 
@@ -375,9 +405,11 @@ Core workflows already available:
 - Local Windows practice and grading
 - Complete-unit random practice
 - Wrong-answer book, redo, and structured analysis
-- Deferred batch translation in the vocabulary book
+- Vocabulary translation after leaving practice, including word-relation comparisons
 - Multiple API profiles and model-catalog synchronization
-- Word draft import and ESQ 1.0 sharing
+- Multiple bank profiles, one recycle bin, and batch paper management
+- Visual Word/PDF draft review, model-assisted import, and resumable batch import
+- Postgraduate English II, CET objective formats, and ESQ 1.1 sharing
 - GPL-3.0-only code license and author metadata
 
 Before the first public release, the maintainer should:
