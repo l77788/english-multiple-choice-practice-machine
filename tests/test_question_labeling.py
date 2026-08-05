@@ -33,6 +33,7 @@ class QuestionLabelingTests(unittest.TestCase):
         result = labeling_status(connection, paper_ids=[8, 7, 8])
         self.assertEqual(result["paper_ids"], [7, 8])
         self.assertIn("p.id IN (?,?)", connection.count_sql)
+        self.assertIn("u.unit_type <> 'listening'", connection.count_sql)
         self.assertEqual(connection.count_params, [7, 8])
         self.assertEqual(result["remaining"], 2)
 
@@ -40,7 +41,7 @@ class QuestionLabelingTests(unittest.TestCase):
         questions = [{"id": value} for value in range(1, 6)]
         calls: list[int] = []
 
-        def fake_request(connection, *, unit, questions):
+        def fake_request(connection, *, unit, questions, **kwargs):
             calls.append(len(questions))
             if len(questions) > 2:
                 raise json.JSONDecodeError("truncated", "{", 1)

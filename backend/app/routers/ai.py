@@ -917,6 +917,9 @@ def label_questions_next(
             paper_ids=request.paper_ids,
             overwrite_unlocked=request.overwrite_unlocked,
             run_id=request.run_id.strip(),
+            profile_id=request.profile_id,
+            model=request.model.strip() or None,
+            max_tokens=request.max_tokens,
         )
     except (ValueError, LookupError, httpx.HTTPError, json.JSONDecodeError) as error:
         raise HTTPException(400, f"标注失败：{error}") from error
@@ -930,7 +933,7 @@ def list_question_labels(
     limit: int = 100,
     connection: sqlite3.Connection = Depends(get_db),
 ) -> list[dict]:
-    conditions = ["1 = 1"]
+    conditions = ["u.unit_type <> 'listening'"]
     params: list = []
     if year is not None:
         conditions.append("p.year = ?")

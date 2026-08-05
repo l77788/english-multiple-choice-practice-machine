@@ -87,6 +87,7 @@ def run_model_assist(
     profile_id: int | None = None,
     model: str | None = None,
     correct_structure: bool = False,
+    max_tokens: int | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Ask the model to locate questions and map answers, returning parsed JSON."""
     prompt = """
@@ -141,7 +142,7 @@ answer_map 的值只能是单个字母 A-H，或判断题使用 T/F；没有把�
         # Word export.  2800 tokens was not enough for the 2002 paper to emit
         # any JSON; 8000 keeps the request bounded while allowing the complete
         # answer map and optional structure fixes to be returned.
-        max_tokens=MODEL_ASSIST_MAX_TOKENS,
+        max_tokens=max_tokens or MODEL_ASSIST_MAX_TOKENS,
     )
     result = parse_json_response(raw)
     if not isinstance(result, dict):

@@ -92,6 +92,7 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
 async def upload_import(
     file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
+    answer_files: list[UploadFile] | None = File(default=None),
     audio_files: list[UploadFile] | None = File(default=None),
     use_model_assist: bool = Form(False),
     model_assist_correct_structure: bool = Form(False),
@@ -100,13 +101,23 @@ async def upload_import(
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     import_started = time.perf_counter()
-    if not file.filename or not file.filename.lower().endswith((".docx", ".doc")):
+    if not file.filename or not file.filename.lower().endswith((".docx", ".doc", ".pdf")):
         raise HTTPException(400, "请选择 Word 文件")
     if answer_file and (
         not answer_file.filename
         or not answer_file.filename.lower().endswith((".docx", ".doc", ".pdf"))
     ):
         raise HTTPException(400, "答案文件仅支持 DOC、DOCX 或 PDF")
+    selected_answer_files = [
+        item
+        for item in ([answer_file] if answer_file else []) + list(answer_files or [])
+        if item and item.filename
+    ]
+    for selected_answer in selected_answer_files:
+        if not selected_answer.filename or not selected_answer.filename.lower().endswith(
+            (".docx", ".doc", ".pdf")
+        ):
+            raise HTTPException(400, "答案文件仅支持 DOC、DOCX 或 PDF")
     audio_paths: list[Path] = []
     if audio_files:
         for audio in audio_files:
@@ -119,7 +130,7 @@ async def upload_import(
     suffix = Path(file.filename).suffix or ".docx"
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name
-    stored_answer_path: Path | None = None
+    stored_answer_paths: list[Path] = []
     selected_profile_id = profile_id or get_active_profile_id(connection)
     if not connection.execute(
         "SELECT 1 FROM question_bank_profiles WHERE id = ? AND deleted_at IS NULL",
@@ -128,18 +139,26 @@ async def upload_import(
         raise HTTPException(404, "目标题库配置不存在")
     with stored_path.open("wb") as target:
         shutil.copyfileobj(file.file, target)
-    if answer_file and answer_file.filename:
-        answer_suffix = Path(answer_file.filename).suffix or ".docx"
+    for selected_answer in selected_answer_files:
+        answer_suffix = Path(selected_answer.filename or "").suffix or ".docx"
         stored_answer_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{answer_suffix}"
         with stored_answer_path.open("wb") as target:
-            shutil.copyfileobj(answer_file.file, target)
+            shutil.copyfileobj(selected_answer.file, target)
+        stored_answer_paths.append(stored_answer_path)
+    primary_answer_path = stored_answer_paths[0] if stored_answer_paths else None
     parse_context: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {
         "pipeline_revision": IMPORT_PIPELINE_REVISION,
         "use_model_assist_requested": use_model_assist,
         "structure_fix_requested": model_assist_correct_structure,
-        "answer_file_received": bool(answer_file and answer_file.filename),
-        "answer_file_name": answer_file.filename if answer_file else "",
+        "answer_file_received": bool(selected_answer_files),
+        "answer_file_count": len(selected_answer_files),
+        "answer_file_name": (
+            selected_answer_files[0].filename if selected_answer_files else ""
+        ),
+        "answer_file_names": [
+            item.filename for item in selected_answer_files if item.filename
+        ],
         "model_call_status": (
             "deferred"
             if use_model_assist and defer_model_assist
@@ -152,9 +171,11 @@ async def upload_import(
         local_started = time.perf_counter()
         draft = parse_exam(
             stored_path,
-            answer_path=stored_answer_path,
+            answer_path=primary_answer_path,
             source_name=file.filename,
-            answer_name=answer_file.filename if answer_file else None,
+            answer_name=(
+                selected_answer_files[0].filename if selected_answer_files else None
+            ),
             audio_paths=audio_paths if audio_paths else None,
         )
         diagnostics.update(
@@ -170,13 +191,29 @@ async def upload_import(
             }
         )
         answer_text = ""
-        if stored_answer_path:
-            answer_text = extract_attachment_text(stored_answer_path)
+        if len(stored_answer_paths) == 1:
+            answer_text = extract_attachment_text(stored_answer_paths[0])
+        elif stored_answer_paths:
+            answer_sections = []
+            for index, attachment_path in enumerate(stored_answer_paths):
+                attachment_name = (
+                    selected_answer_files[index].filename or attachment_path.name
+                )
+                extracted = extract_attachment_text(attachment_path)
+                if extracted.strip():
+                    answer_sections.append(
+                        f"===== answer attachment: {attachment_name} =====\n{extracted}"
+                    )
+            answer_text = "\n\n".join(answer_sections)
         elif not draft.get("answers"):
             companion = find_companion_answer_pdf(stored_path, draft.get("year"))
             if companion:
                 answer_text = extract_attachment_text(companion)
-        parse_context["answer_text"] = answer_text[:20000]
+        parse_context["answer_text"] = answer_text[:80000]
+        if stored_answer_paths:
+            parse_context["answer_paths"] = [
+                str(path) for path in stored_answer_paths
+            ]
         if audio_paths:
             parse_context["audio_paths"] = [str(p) for p in audio_paths]
         diagnostics["answer_text_chars"] = len(parse_context["answer_text"])
@@ -236,8 +273,10 @@ async def upload_import(
         parse_context["import_diagnostics"] = diagnostics
     except Exception as error:
         stored_path.unlink(missing_ok=True)
-        if stored_answer_path:
+        for stored_answer_path in stored_answer_paths:
             stored_answer_path.unlink(missing_ok=True)
+        for audio_path in audio_paths:
+            audio_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Word解析失败：{error}") from error
     cursor = connection.execute(
         """
@@ -251,7 +290,7 @@ async def upload_import(
             selected_profile_id,
             file.filename,
             str(stored_path),
-            str(stored_answer_path or ""),
+            str(primary_answer_path or ""),
             draft.get("year"),
             draft.get("detected_format"),
             json.dumps(draft, ensure_ascii=False),
@@ -318,6 +357,7 @@ def model_assist_retry(
             profile_id=request.profile_id,
             model=request.model.strip() or None,
             correct_structure=request.correct_structure,
+            max_tokens=request.max_tokens,
         )
         draft = apply_model_assist(
             draft,

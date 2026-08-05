@@ -631,6 +631,43 @@ class ImportAnswerFlowTests(unittest.TestCase):
         self.assertTrue(
             any("重复题号" in warning for warning in result["warnings"])
         )
+    def test_multiple_answer_attachments_are_merged_for_model_assist(self) -> None:
+        from backend.app.database import connect
+        from backend.app.routers import imports as imports_router
+
+        draft = self._minimal_draft()
+        with (
+            patch.object(imports_router, "parse_exam", return_value=draft),
+            patch.object(
+                imports_router,
+                "extract_attachment_text",
+                side_effect=["first answers", "second answers", "third answers"],
+            ),
+        ):
+            response = self.client.post(
+                "/api/imports",
+                files=[
+                    ("file", ("paper.docx", io.BytesIO(b"paper"), "application/octet-stream")),
+                    ("answer_files", ("set-1.pdf", io.BytesIO(b"one"), "application/pdf")),
+                    ("answer_files", ("set-2.pdf", io.BytesIO(b"two"), "application/pdf")),
+                    ("answer_files", ("set-3.pdf", io.BytesIO(b"three"), "application/pdf")),
+                ],
+                data={"use_model_assist": "true", "defer_model_assist": "true"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["draft"]["import_diagnostics"]["answer_file_count"], 3)
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT parse_context FROM import_jobs WHERE id = ?",
+                (body["id"],),
+            ).fetchone()
+        context = json.loads(row["parse_context"])
+        self.assertIn("first answers", context["answer_text"])
+        self.assertIn("second answers", context["answer_text"])
+        self.assertIn("third answers", context["answer_text"])
+        self.assertEqual(len(context["answer_paths"]), 3)
 
 
 if __name__ == "__main__":

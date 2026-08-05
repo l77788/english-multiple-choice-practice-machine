@@ -34,7 +34,10 @@ def labeling_status(
     paper_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     params: list[Any] = []
-    conditions: list[str] = ["p.deleted_at IS NULL"]
+    conditions: list[str] = [
+        "p.deleted_at IS NULL",
+        "u.unit_type <> 'listening'",
+    ]
     if not paper_ids:
         conditions.append("p.profile_id = ?")
         params.append(get_active_profile_id(connection))
@@ -124,6 +127,7 @@ def _next_unit(
         _eligible_condition(overwrite_unlocked),
         "ri.question_id IS NULL",
         "p.deleted_at IS NULL",
+        "u.unit_type <> 'listening'",
     ]
     if not paper_ids:
         conditions.append("p.profile_id = ?")
@@ -199,6 +203,9 @@ def _request_labels(
     *,
     unit: sqlite3.Row,
     questions: list[dict[str, Any]],
+    profile_id: int | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     messages = [
         {"role": "system", "content": LABEL_PROMPT},
@@ -220,7 +227,9 @@ def _request_labels(
         connection,
         messages,
         response_format={"type": "json_object"},
-        max_tokens=4200,
+        profile_id=profile_id,
+        model=model,
+        max_tokens=max_tokens or 4200,
     )
     parsed = parse_json_response(raw)
     labels = parsed.get("labels") if isinstance(parsed, dict) else None
@@ -243,9 +252,19 @@ def _request_batch_with_fallback(
     *,
     unit: sqlite3.Row,
     questions: list[dict[str, Any]],
+    profile_id: int | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
 ) -> list[dict[str, Any]]:
     try:
-        return _request_labels(connection, unit=unit, questions=questions)
+        return _request_labels(
+            connection,
+            unit=unit,
+            questions=questions,
+            profile_id=profile_id,
+            model=model,
+            max_tokens=max_tokens,
+        )
     except (ValueError, json.JSONDecodeError) as error:
         if len(questions) <= 1:
             raise ValueError(f"模型未能完成题目标签：{error}") from error
@@ -255,11 +274,17 @@ def _request_batch_with_fallback(
                 connection,
                 unit=unit,
                 questions=questions[:midpoint],
+                profile_id=profile_id,
+                model=model,
+                max_tokens=max_tokens,
             ),
             *_request_batch_with_fallback(
                 connection,
                 unit=unit,
                 questions=questions[midpoint:],
+                profile_id=profile_id,
+                model=model,
+                max_tokens=max_tokens,
             ),
         ]
 
@@ -369,6 +394,9 @@ def label_next_unit(
     paper_ids: list[int] | None = None,
     overwrite_unlocked: bool,
     run_id: str = "",
+    profile_id: int | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     effective_run_id = _effective_run_id(run_id)
     unit = _next_unit(
@@ -400,7 +428,7 @@ def label_next_unit(
             "unit_title": f"{unit['year']} 年 {unit['title']}",
             **labeling_status(connection, year, paper_ids),
         }
-    profile = get_ai_profile(connection)
+    profile = get_ai_profile(connection, profile_id)
     processed = 0
     # Each call keeps the complete passage but emits at most five labels.
     # Successful sub-batches are committed immediately.
@@ -410,6 +438,9 @@ def label_next_unit(
             connection,
             unit=unit,
             questions=batch,
+            profile_id=profile_id,
+            model=model,
+            max_tokens=max_tokens,
         )
         processed += _save_labels(
             connection,

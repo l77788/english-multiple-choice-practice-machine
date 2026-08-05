@@ -67,6 +67,8 @@ def _convert_legacy(source: Path) -> Path:
 
 
 def detect_format(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":
+        return "text_pdf"
     signature = path.read_bytes()[:8]
     if signature == bytes.fromhex("D0CF11E0A1B11AE1"):
         return "legacy_doc"
@@ -190,6 +192,22 @@ def extract_blocks(path: Path) -> tuple[list[str], str, Path | None]:
     detected = detect_format(path)
     converted: Path | None = None
     parse_path = path
+    if detected == "text_pdf":
+        reader = PdfReader(str(path))
+        blocks: list[str] = []
+        for page in reader.pages:
+            try:
+                page_text = page.extract_text(extraction_mode="layout") or ""
+            except Exception:
+                page_text = page.extract_text() or ""
+            blocks.extend(
+                cleaned
+                for line in page_text.splitlines()
+                if (cleaned := clean_text(line))
+            )
+        if len(re.sub(r"\s+", "", "\n".join(blocks))) < 100:
+            raise ValueError("PDF 未检测到可靠文字层，请改用 Word 或先进行 OCR")
+        return blocks, detected, None
     if detected == "legacy_doc":
         converted = _convert_legacy(path)
         parse_path = converted

@@ -405,10 +405,23 @@ def restore_trash(
 
 
 def _purge_job_files(row: sqlite3.Row) -> None:
+    paths: set[str] = set()
     for key in ("stored_path", "answer_stored_path"):
         value = str(row[key] or "").strip() if key in row.keys() else ""
         if value:
-            Path(value).unlink(missing_ok=True)
+            paths.add(value)
+    if "parse_context" in row.keys():
+        try:
+            context = json.loads(row["parse_context"] or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        for key in ("answer_paths", "audio_paths"):
+            for value in context.get(key, []):
+                cleaned = str(value or "").strip()
+                if cleaned:
+                    paths.add(cleaned)
+    for value in paths:
+        Path(value).unlink(missing_ok=True)
 
 
 def purge_trash(
@@ -423,7 +436,7 @@ def purge_trash(
         raise ValueError("回收站项目不存在")
     group = connection.execute(
         """
-        SELECT t.*, j.stored_path, j.answer_stored_path
+        SELECT t.*, j.stored_path, j.answer_stored_path, j.parse_context
         FROM trash_entries AS t
         LEFT JOIN import_jobs AS j
           ON t.resource_type = 'import_job' AND j.id = t.resource_id

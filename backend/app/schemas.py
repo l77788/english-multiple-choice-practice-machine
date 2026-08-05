@@ -100,6 +100,9 @@ class AiLabelBatchRequest(BaseModel):
     paper_ids: list[int] = Field(default_factory=list, max_length=100)
     overwrite_unlocked: bool = False
     run_id: str = Field(default="", max_length=80)
+    profile_id: int | None = None
+    model: str = ""
+    max_tokens: int | None = Field(default=None, ge=512, le=64000)
 
 
 class AiQuestionLabelUpdate(BaseModel):
@@ -143,6 +146,10 @@ class ModelAssistRequest(BaseModel):
     profile_id: int | None = None
     model: str = ""
     correct_structure: bool = False
+    # Batch imports may need a larger JSON answer map than the normal
+    # interactive import flow. Keep the default behavior unchanged while
+    # allowing a caller to opt into a provider-specific output budget.
+    max_tokens: int | None = Field(default=None, ge=512, le=64000)
 
 
 class VocabularyCreate(BaseModel):

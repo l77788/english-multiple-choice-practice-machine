@@ -24,6 +24,7 @@ design-system/
 *.bak
 *.backup
 *.log
+.codex-local/batch-import-state.json
 
 # Secrets and local certificates
 .env

@@ -54,7 +54,7 @@ const router = useRouter()
 const jobs = ref<any[]>([])
 const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
-const selectedAnswerFile = ref<File | null>(null)
+const selectedAnswerFiles = ref<File[]>([])
 const useModelAssist = ref(true)
 const modelAssistRewrite = ref(false)
 const assistDialogOpen = ref(false)
@@ -296,7 +296,7 @@ async function upload() {
   const uploadTimer = window.setInterval(() => { uploadElapsedSeconds.value += 1 }, 1000)
   const form = new FormData(); form.append('file', selectedFile.value)
   form.append('profile_id', String(targetProfileId.value))
-  if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
+  selectedAnswerFiles.value.forEach(file => form.append('answer_files', file))
   form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
   form.append('model_assist_correct_structure', modelAssistRewrite.value ? 'true' : 'false')
   form.append('defer_model_assist', useModelAssist.value ? 'true' : 'false')
@@ -664,8 +664,8 @@ async function exportEsq(includeLabels = false) {
               <option v-for="profile in questionBankProfilesState.items" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
             </select>
           </label>
-          <label class="field"><span>试卷 Word（必选）</span><input type="file" accept=".doc,.docx" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
-          <label class="field"><span>答案附件（可选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedAnswerFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <label class="field"><span>试卷 Word / 文本型 PDF（必选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
+          <label class="field"><span>答案附件（可多选）</span><input type="file" accept=".doc,.docx,.pdf" multiple @change="selectedAnswerFiles=Array.from(($event.target as HTMLInputElement).files || [])"><small v-if="selectedAnswerFiles.length">已选择 {{ selectedAnswerFiles.length }} 份答案附件</small></label>
           <label class="import-assist-toggle">
             <input v-model="useModelAssist" type="checkbox">
             <span>上传解析时用模型辅助定位题目与对应答案（默认开启）</span>
