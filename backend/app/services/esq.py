@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import io
@@ -523,8 +523,9 @@ def load_esq_package(path: Path) -> dict[str, Any]:
 def _validate_manifest(manifest: dict[str, Any], details: list[dict[str, str]]) -> None:
     if manifest.get("format") != "esq":
         _error(details, "manifest.format", "必须为 esq")
-    if manifest.get("schemaVersion") != "1.0":
-        _error(details, "manifest.schemaVersion", "当前仅支持 ESQ 1.0")
+    schema_version = manifest.get("schemaVersion", "")
+    if schema_version not in ("1.0", "1.1"):
+        _error(details, "manifest.schemaVersion", "仅支持 ESQ 1.0 / 1.1")
     _key(manifest.get("packageId"), "manifest.packageId", details)
     if not isinstance(manifest.get("contentVersion"), str) or not SEMVER_RE.fullmatch(manifest["contentVersion"]):
         _error(details, "manifest.contentVersion", "必须是语义化版本号")
@@ -544,6 +545,23 @@ def _validate_manifest(manifest: dict[str, Any], details: list[dict[str, str]]) 
     papers = manifest.get("papers")
     if not isinstance(papers, list) or not papers:
         _error(details, "manifest.papers", "至少包含一套试卷")
+    if schema_version == "1.1":
+        for index, paper_entry in enumerate(papers):
+            path = f"manifest.papers[{index}]"
+            if not isinstance(paper_entry, dict):
+                continue
+            exam_type = paper_entry.get("examType")
+            if isinstance(exam_type, str) and exam_type not in {"", "cet4", "cet6", "postgraduate_english1", "postgraduate_english2"}:
+                _error(details, f"{path}.examType", "不支持的考试类型")
+            exam_month = paper_entry.get("examMonth")
+            if exam_month is not None and not isinstance(exam_month, int):
+                _error(details, f"{path}.examMonth", "必须是整数")
+            set_number = paper_entry.get("setNumber")
+            if set_number is not None and not isinstance(set_number, int):
+                _error(details, f"{path}.setNumber", "必须是整数")
+            listening_tracks = paper_entry.get("listeningTracks")
+            if listening_tracks is not None and not isinstance(listening_tracks, list):
+                _error(details, f"{path}.listeningTracks", "必须是数组")
 
 
 def build_preview(
@@ -1152,6 +1170,9 @@ def export_package(
             "year": paper_row["year"],
             "title": paper_row["title"],
             "subject": paper_row["subject"],
+            "examType": paper_row["exam_type"] if "exam_type" in paper_row.keys() else "",
+            "examMonth": paper_row["exam_month"] if "exam_month" in paper_row.keys() else 0,
+            "setNumber": paper_row["set_number"] if "set_number" in paper_row.keys() else 1,
             "units": [],
         }
         answers: dict[str, Any] = {}
@@ -1262,6 +1283,16 @@ def export_package(
             "path": paper_path,
             "answerPath": answer_path,
         }
+        paper_exam_type_ref = paper_row["exam_type"] if "exam_type" in paper_row.keys() else ""
+        paper_exam_month_ref = paper_row["exam_month"] if "exam_month" in paper_row.keys() else 0
+        has_cet_meta = bool(paper_exam_type_ref or paper_exam_month_ref)
+        if has_cet_meta:
+            reference["examType"] = paper_exam_type_ref
+            reference["examMonth"] = paper_exam_month_ref
+            reference["setNumber"] = paper_row["set_number"] if "set_number" in paper_row.keys() else 1
+            session_group = paper_row["session_group_key"] if "session_group_key" in paper_row.keys() else ""
+            if session_group:
+                reference["sessionGroupKey"] = session_group
         if include_labels and labels:
             label_path = f"labels/{paper_row['year']}.json"
             reference["labelPath"] = label_path
@@ -1275,7 +1306,7 @@ def export_package(
         answer_files[answer_path] = {"paperKey": paper_key, "answers": answers}
     manifest = {
         "format": "esq",
-        "schemaVersion": "1.0",
+        "schemaVersion": "1.1" if any(p.get("examType") for p in manifest_papers) else "1.0",
         "packageId": package_id,
         "contentVersion": "1.0.0",
         "title": f"英语刷题机导出题库 {package_suffix}",
