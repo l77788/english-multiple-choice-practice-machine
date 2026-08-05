@@ -15,6 +15,25 @@ class PracticeCreate(BaseModel):
     shuffle_options: bool = True
 
 
+class QuestionBankProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+
+class QuestionBankProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    description: str | None = Field(default=None, max_length=500)
+
+
+class BatchPaperMoveRequest(BaseModel):
+    paper_ids: list[int] = Field(min_length=1, max_length=200)
+    target_profile_id: int
+
+
+class TrashRestoreRequest(BaseModel):
+    target_profile_id: int | None = None
+
+
 class AnswerUpdate(BaseModel):
     answer: str
     option_order: list[str] = Field(default_factory=list)

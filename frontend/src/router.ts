@@ -7,6 +7,7 @@ import PracticeView from './views/PracticeView.vue'
 import SettingsView from './views/SettingsView.vue'
 import WrongView from './views/WrongView.vue'
 import VocabularyView from './views/VocabularyView.vue'
+import TrashView from './views/TrashView.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -19,5 +20,6 @@ export default createRouter({
     { path: '/imports', component: ImportView },
     { path: '/assistant', component: AiAssistant },
     { path: '/settings', component: SettingsView },
+    { path: '/trash', component: TrashView },
   ],
 })

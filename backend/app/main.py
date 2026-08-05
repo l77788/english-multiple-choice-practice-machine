@@ -11,9 +11,20 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import FRONTEND_DIST
 from .database import connect, initialize_database
-from .routers import ai, dashboard, imports, papers, practice, question_banks, vocabulary, wrong
+from .routers import (
+    ai,
+    dashboard,
+    imports,
+    papers,
+    practice,
+    question_bank_profiles,
+    question_banks,
+    vocabulary,
+    wrong,
+)
 from .services.ai_client import ensure_ai_model_catalog
 from .services.vocabulary import clean_machine_meanings, translate_queued_vocabulary
+from .services.trash import purge_expired
 
 
 @asynccontextmanager
@@ -22,6 +33,7 @@ async def lifespan(_: FastAPI):
     with connect() as connection:
         ensure_ai_model_catalog(connection)
         clean_machine_meanings(connection)
+        purge_expired(connection)
     threading.Thread(
         target=translate_queued_vocabulary,
         name="vocabulary-translation-recovery",
@@ -50,6 +62,7 @@ app.include_router(practice.router, prefix="/api")
 app.include_router(wrong.router, prefix="/api")
 app.include_router(imports.router, prefix="/api")
 app.include_router(question_banks.router, prefix="/api")
+app.include_router(question_bank_profiles.router, prefix="/api")
 app.include_router(ai.router, prefix="/api")
 app.include_router(vocabulary.router, prefix="/api")
 

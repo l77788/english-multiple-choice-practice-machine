@@ -4,7 +4,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends
 
-from ..database import get_db
+from ..database import get_active_profile_id, get_db
 
 
 router = APIRouter(tags=["dashboard"])
@@ -14,23 +14,55 @@ router = APIRouter(tags=["dashboard"])
 @router.get("/overview", include_in_schema=False)
 @router.get("/dashboard", include_in_schema=False)
 def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
+    profile_id = get_active_profile_id(connection)
+    profile = connection.execute(
+        "SELECT id, name FROM question_bank_profiles WHERE id = ?",
+        (profile_id,),
+    ).fetchone()
     paper_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM papers WHERE status = 'published'"
+        """
+        SELECT COUNT(*) AS count FROM papers
+        WHERE status = 'published' AND profile_id = ? AND deleted_at IS NULL
+        """,
+        (profile_id,),
     ).fetchone()["count"]
-    unit_count = connection.execute("SELECT COUNT(*) AS count FROM units").fetchone()[
-        "count"
-    ]
+    unit_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count FROM units
+        JOIN papers ON papers.id = units.paper_id
+        WHERE papers.profile_id = ? AND papers.deleted_at IS NULL
+        """,
+        (profile_id,),
+    ).fetchone()["count"]
     question_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM questions"
+        """
+        SELECT COUNT(*) AS count FROM questions
+        JOIN units ON units.id = questions.unit_id
+        JOIN papers ON papers.id = units.paper_id
+        WHERE papers.profile_id = ? AND papers.deleted_at IS NULL
+        """,
+        (profile_id,),
     ).fetchone()["count"]
     wrong_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM wrong_stats WHERE wrong_count > 0"
+        """
+        SELECT COUNT(*) AS count FROM wrong_stats
+        JOIN questions ON questions.id = wrong_stats.question_id
+        JOIN units ON units.id = questions.unit_id
+        JOIN papers ON papers.id = units.paper_id
+        WHERE wrong_stats.wrong_count > 0
+          AND papers.profile_id = ? AND papers.deleted_at IS NULL
+        """,
+        (profile_id,),
     ).fetchone()["count"]
     frequent_count = connection.execute(
         """
         SELECT COUNT(*) AS count
         FROM wrong_stats
-        WHERE manually_frequent = 1
+        JOIN questions ON questions.id = wrong_stats.question_id
+        JOIN units ON units.id = questions.unit_id
+        JOIN papers ON papers.id = units.paper_id
+        WHERE (
+              manually_frequent = 1
            OR wrong_count >= 3
            OR (
                 json_array_length(recent_results) >= 5
@@ -39,8 +71,10 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
                     FROM json_each(recent_results)
                     WHERE value = 0
                 ) >= 3
-           )
-        """
+           ))
+          AND papers.profile_id = ? AND papers.deleted_at IS NULL
+        """,
+        (profile_id,),
     ).fetchone()["count"]
     recent = connection.execute(
         """
@@ -50,11 +84,14 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
                practice_sessions.max_score, papers.year
         FROM practice_sessions
         LEFT JOIN papers ON papers.id = practice_sessions.paper_id
+        WHERE papers.profile_id = ? OR practice_sessions.paper_id IS NULL
         ORDER BY practice_sessions.id DESC
         LIMIT 5
-        """
+        """,
+        (profile_id,),
     ).fetchall()
     return {
+        "active_profile": dict(profile) if profile else None,
         "paper_count": paper_count,
         "unit_count": unit_count,
         "question_count": question_count,

@@ -5,11 +5,11 @@ import sqlite3
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from ..config import QUESTION_BANK_DIR, UPLOAD_DIR
-from ..database import get_db
+from ..database import get_active_profile_id, get_db
 from ..schemas import QuestionBankPublishRequest
 from ..services.esq import (
     MAX_PACKAGE_BYTES,
@@ -19,6 +19,7 @@ from ..services.esq import (
     load_esq_package,
     publish_package,
 )
+from ..services.trash import trash_import_job
 
 
 router = APIRouter(prefix="/question-banks", tags=["question-banks"])
@@ -55,14 +56,17 @@ def _serialize_job(row: sqlite3.Row) -> dict:
 def list_question_bank_imports(
     connection: sqlite3.Connection = Depends(get_db),
 ) -> list[dict]:
+    profile_id = get_active_profile_id(connection)
     rows = connection.execute(
         """
-        SELECT id, filename, detected_year, detected_format, status,
+        SELECT id, profile_id, filename, detected_year, detected_format, status,
                warnings, parse_context, created_at, updated_at
         FROM import_jobs
         WHERE detected_format = 'esq-1.0'
+          AND profile_id = ? AND deleted_at IS NULL
         ORDER BY id DESC
-        """
+        """,
+        (profile_id,),
     ).fetchall()
     return [_serialize_job(row) for row in rows]
 
@@ -70,8 +74,15 @@ def list_question_bank_imports(
 @router.post("/imports")
 async def upload_question_bank(
     file: UploadFile = File(...),
+    profile_id: int | None = Form(default=None),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    selected_profile_id = profile_id or get_active_profile_id(connection)
+    if not connection.execute(
+        "SELECT 1 FROM question_bank_profiles WHERE id = ? AND deleted_at IS NULL",
+        (selected_profile_id,),
+    ).fetchone():
+        raise _error("PROFILE_NOT_FOUND", "目标题库配置不存在")
     if not file.filename or Path(file.filename).suffix.lower() not in {".esq", ".zip"}:
         raise _error("UNSUPPORTED_FILE", "请选择 .esq 或 .zip 题库包")
     stored_path = UPLOAD_DIR / f"{uuid.uuid4().hex}.esq"
@@ -87,7 +98,7 @@ async def upload_question_bank(
                     raise _error("FILE_TOO_LARGE", "ESQ 文件不能超过 100 MiB")
                 target.write(chunk)
         package = load_esq_package(stored_path)
-        preview = build_preview(connection, package)
+        preview = build_preview(connection, package, profile_id=selected_profile_id)
         serializable = {
             **package,
             "source_path": str(stored_path),
@@ -96,11 +107,12 @@ async def upload_question_bank(
         cursor = connection.execute(
             """
             INSERT INTO import_jobs
-                (filename, stored_path, detected_year, detected_format,
+                (profile_id, filename, stored_path, detected_year, detected_format,
                  status, draft_data, warnings)
-            VALUES (?, ?, ?, 'esq-1.0', 'draft', ?, '[]')
+            VALUES (?, ?, ?, ?, 'esq-1.0', 'draft', ?, '[]')
             """,
             (
+                selected_profile_id,
                 file.filename,
                 str(stored_path),
                 detected_year,
@@ -114,6 +126,7 @@ async def upload_question_bank(
             "format": "esq-1.0",
             "preview": preview,
             "warnings": [],
+            "profile_id": selected_profile_id,
         }
     except EsqValidationError as error:
         stored_path.unlink(missing_ok=True)
@@ -139,8 +152,22 @@ def question_bank_import_detail(
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "题库导入任务不存在"})
     payload = _serialize_job(row)
     package = payload["draft_data"]
-    preview = build_preview(connection, package)
+    preview = build_preview(connection, package, profile_id=int(row["profile_id"]))
     return {**payload, "preview": preview}
+
+
+@router.delete("/imports/{job_id}")
+def delete_question_bank_import(
+    job_id: int,
+    connection: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    try:
+        result = trash_import_job(connection, job_id)
+        connection.commit()
+        return {"trashed": True, **result}
+    except ValueError as error:
+        connection.rollback()
+        raise _error("DELETE_FAILED", str(error)) from error
 
 
 @router.post("/imports/{job_id}/publish")
@@ -157,7 +184,7 @@ def publish_question_bank(
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "题库导入任务不存在"})
     payload = _serialize_job(row)
     package = payload["draft_data"]
-    preview = build_preview(connection, package)
+    preview = build_preview(connection, package, profile_id=int(row["profile_id"]))
     existing_conflicts = {
         item["paperKey"]
         for item in preview["conflicts"]
@@ -184,6 +211,7 @@ def publish_question_bank(
             source_path,
             resolutions,
             import_ai_labels=request.import_ai_labels,
+            profile_id=int(row["profile_id"]),
         )
         published_papers = [
             item
@@ -243,6 +271,7 @@ def export_question_bank(
             years=selected_years,
             include_answers=include_answers,
             include_labels=include_labels,
+            profile_id=get_active_profile_id(connection),
         )
     except ValueError as error:
         raise _error("EXPORT_FAILED", str(error)) from error

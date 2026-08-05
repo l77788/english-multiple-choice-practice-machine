@@ -5,7 +5,7 @@ import sqlite3
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..database import get_db
+from ..database import get_active_profile_id, get_db
 
 
 router = APIRouter(prefix="/wrong", tags=["wrong"])
@@ -13,6 +13,7 @@ router = APIRouter(prefix="/wrong", tags=["wrong"])
 
 @router.get("")
 def list_wrong(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]:
+    profile_id = get_active_profile_id(connection)
     rows = connection.execute(
         """
         SELECT questions.id AS question_id, questions.number, questions.stem,
@@ -23,10 +24,13 @@ def list_wrong(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]:
         JOIN units ON units.id = questions.unit_id
         JOIN papers ON papers.id = units.paper_id
         WHERE wrong_stats.wrong_count > 0
+          AND papers.profile_id = ?
+          AND papers.deleted_at IS NULL
         ORDER BY wrong_stats.manually_frequent DESC,
                  wrong_stats.wrong_count DESC,
                  wrong_stats.last_wrong_at DESC
-        """
+        """,
+        (profile_id,),
     ).fetchall()
     result = []
     for row in rows:
@@ -61,4 +65,3 @@ def mark_frequent(
         raise HTTPException(404, "错题不存在")
     connection.commit()
     return {"updated": True}
-

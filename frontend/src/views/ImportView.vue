@@ -15,10 +15,13 @@ import {
   Search,
   Settings,
   Sparkles,
+  Trash2,
 } from 'lucide-vue-next'
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api, get, patch, post, put } from '../api'
+import { api, del, get, patch, post, put } from '../api'
+import QuestionBankSwitcher from '../components/QuestionBankSwitcher.vue'
+import { loadQuestionBankProfiles, questionBankProfilesState } from '../services/questionBankProfiles'
 import {
   type LabelScope,
   type LabelStatus,
@@ -89,6 +92,7 @@ const labelPromptHasModel = ref(false)
 const labelPromptBusy = ref(false)
 const labelPromptError = ref('')
 const labelLaterButton = ref<HTMLButtonElement | null>(null)
+const targetProfileId = ref(0)
 const answerUnits = computed(() => current.value?.draft?.units || [])
 const answerProgress = computed(() => {
   const questions = answerUnits.value.flatMap((unit: any) => unit.questions || [])
@@ -261,6 +265,8 @@ async function saveQuestionLabel() {
 
 onMounted(async () => {
   try {
+    await loadQuestionBankProfiles()
+    targetProfileId.value = questionBankProfilesState.activeId
     await Promise.all([loadJobs(), loadEsqJobs()])
     if (questionLabelingState.scope?.kind === 'papers') {
       setImportLabelScope(questionLabelingState.scope)
@@ -275,6 +281,13 @@ onMounted(async () => {
   }
 })
 
+async function handleProfileChanged() {
+  targetProfileId.value = questionBankProfilesState.activeId
+  current.value = null
+  esqCurrent.value = null
+  await Promise.all([loadJobs(), loadEsqJobs()])
+}
+
 async function upload() {
   if (!selectedFile.value) return
   busy.value = true; error.value = ''; notice.value = ''
@@ -282,6 +295,7 @@ async function upload() {
   uploadElapsedSeconds.value = 0
   const uploadTimer = window.setInterval(() => { uploadElapsedSeconds.value += 1 }, 1000)
   const form = new FormData(); form.append('file', selectedFile.value)
+  form.append('profile_id', String(targetProfileId.value))
   if (selectedAnswerFile.value) form.append('answer_file', selectedAnswerFile.value)
   form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
   form.append('model_assist_correct_structure', modelAssistRewrite.value ? 'true' : 'false')
@@ -483,6 +497,7 @@ async function uploadEsq() {
   if (!selectedEsqFile.value) return
   busy.value = true; error.value = ''
   const form = new FormData(); form.append('file', selectedEsqFile.value)
+  form.append('profile_id', String(targetProfileId.value))
   try {
     const result: any = await api('/question-banks/imports', { method: 'POST', body: form })
     esqCurrent.value = await get(`/question-banks/imports/${result.id}`)
@@ -491,6 +506,22 @@ async function uploadEsq() {
     notice.value = 'ESQ 题库包已完成校验，请检查冲突后发布'
   } catch (e) { error.value = String(e) }
   finally { busy.value = false }
+}
+
+async function removeImportJob(job: any, esq = false) {
+  if (!confirm(`将未完成导入“${job.filename}”及原始文件移入回收站？`)) return
+  try {
+    await del(`${esq ? '/question-banks/imports' : '/imports'}/${job.id}`)
+    if (esq) {
+      if (esqCurrent.value?.id === job.id) esqCurrent.value = null
+      await loadEsqJobs()
+    } else {
+      if (current.value?.id === job.id) current.value = null
+      await loadJobs()
+    }
+  } catch (cause) {
+    error.value = String(cause)
+  }
 }
 
 async function openEsqJob(id: number) {
@@ -556,6 +587,7 @@ async function exportEsq(includeLabels = false) {
 <template>
   <div class="page">
     <div class="page-head"><div><span class="eyebrow">IMPORT & REVIEW</span><h1>导入题库</h1><p class="lead">试卷和答案分别解析。即使答案缺失，也可以先保存题目草稿，再人工补全。</p></div></div>
+    <QuestionBankSwitcher @changed="handleProfileChanged" />
     <div v-if="error" class="warning" role="alert">{{ error }}</div><div v-if="notice" class="card" style="margin-bottom:16px;color:var(--success)">{{ notice }}</div>
 
     <section class="question-label-workspace card" aria-labelledby="question-label-title">
@@ -626,6 +658,12 @@ async function exportEsq(includeLabels = false) {
     <div class="grid" style="grid-template-columns:320px 1fr">
       <aside>
         <div class="card">
+          <label class="field">
+            <span>导入到题库配置</span>
+            <select v-model.number="targetProfileId">
+              <option v-for="profile in questionBankProfilesState.items" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+            </select>
+          </label>
           <label class="field"><span>试卷 Word（必选）</span><input type="file" accept=".doc,.docx" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
           <label class="field"><span>答案附件（可选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedAnswerFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
           <label class="import-assist-toggle">
@@ -659,12 +697,14 @@ async function exportEsq(includeLabels = false) {
           <div v-for="job in esqJobs" :key="job.id" class="card import-history-card">
             <button type="button" class="import-history-open" @click="openEsqJob(job.id)"><span><strong>{{ job.detected_year || '多年份' }}</strong><small>{{ job.filename }}</small></span><span v-if="job.published_paper_ids?.length" class="pill">已入库</span></button>
             <button v-if="job.published_paper_ids?.length" class="button ghost compact" type="button" @click="promptLabelingForJob(job)"><Sparkles :size="14" />开始智能标注</button>
+            <button v-else class="button ghost danger compact" type="button" @click="removeImportJob(job, true)"><Trash2 :size="14" />删除草稿</button>
           </div>
         </div>
         <div class="section-title"><h3>导入记录</h3></div>
         <div v-for="job in jobs" :key="job.id" class="card import-history-card">
           <button type="button" class="import-history-open" @click="openJob(job.id)"><span><strong>{{ job.detected_year || '未知年份' }}</strong><small>{{ job.filename }}</small></span><span v-if="job.published_paper_ids?.length" class="pill">已入库</span></button>
           <button v-if="job.published_paper_ids?.length" class="button ghost compact" type="button" @click="promptLabelingForJob(job)"><Sparkles :size="14" />开始智能标注</button>
+          <button v-else class="button ghost danger compact" type="button" @click="removeImportJob(job)"><Trash2 :size="14" />删除草稿</button>
         </div>
       </aside>
       <section v-if="esqCurrent?.preview" class="grid">

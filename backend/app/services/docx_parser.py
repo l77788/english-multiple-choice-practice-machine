@@ -1187,25 +1187,52 @@ def import_exam_folder(
     return results
 
 
-def publish_draft(connection: Any, draft: dict[str, Any], source_file: str) -> int:
+def publish_draft(
+    connection: Any,
+    draft: dict[str, Any],
+    source_file: str,
+    *,
+    profile_id: int = 1,
+) -> int:
     year = draft.get("year")
     if not year:
         raise ValueError("试卷年份不能为空")
-    cursor = connection.execute(
+    subject = draft.get("subject", "英语一")
+    external_key = str(
+        draft.get("paper_key")
+        or f"document:{year}:{subject}:{draft['title']}"
+    ).strip()
+    paper = connection.execute(
         """
-        INSERT INTO papers (year, subject, title, source_file, status)
-        VALUES (?, ?, ?, ?, 'published')
-        ON CONFLICT(year) DO UPDATE SET
-            subject = excluded.subject,
-            title = excluded.title,
-            source_file = excluded.source_file,
-            status = 'published',
-            updated_at = CURRENT_TIMESTAMP
+        SELECT id FROM papers
+        WHERE profile_id = ? AND deleted_at IS NULL
+          AND (external_key = ? OR (external_key IS NULL AND year = ? AND title = ?))
+        ORDER BY id LIMIT 1
         """,
-        (year, draft.get("subject", "英语一"), draft["title"], source_file),
-    )
-    paper = connection.execute("SELECT id FROM papers WHERE year = ?", (year,)).fetchone()
-    paper_id = paper["id"]
+        (profile_id, external_key, year, draft["title"]),
+    ).fetchone()
+    if paper:
+        paper_id = int(paper["id"])
+        connection.execute(
+            """
+            UPDATE papers
+            SET year = ?, subject = ?, title = ?, source_file = ?,
+                status = 'published', external_key = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (year, subject, draft["title"], source_file, external_key, paper_id),
+        )
+    else:
+        cursor = connection.execute(
+            """
+            INSERT INTO papers
+                (profile_id, year, subject, title, source_file, status, external_key)
+            VALUES (?, ?, ?, ?, ?, 'published', ?)
+            """,
+            (profile_id, year, subject, draft["title"], source_file, external_key),
+        )
+        paper_id = int(cursor.lastrowid)
     connection.execute("DELETE FROM units WHERE paper_id = ?", (paper_id,))
     for unit in draft["units"]:
         unit_cursor = connection.execute(

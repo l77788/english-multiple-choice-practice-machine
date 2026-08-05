@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
+from ..database import get_active_profile_id
 from ..schemas import PracticeCreate
 from .questions import parse_json, serialize_unit
 
@@ -29,11 +30,26 @@ class IncompleteSubmissionError(ValueError):
 def _select_unit_ids(
     connection: sqlite3.Connection, request: PracticeCreate
 ) -> tuple[list[int], int | None]:
+    active_profile_id = get_active_profile_id(connection)
     if request.mode == "paper":
         if request.paper_id is None:
             raise ValueError("按年份练习需要选择试卷")
+        paper = connection.execute(
+            """
+            SELECT id FROM papers
+            WHERE id = ? AND profile_id = ? AND deleted_at IS NULL
+            """,
+            (request.paper_id, active_profile_id),
+        ).fetchone()
+        if paper is None:
+            raise ValueError("试卷不存在或不属于当前题库配置")
         rows = connection.execute(
-            "SELECT id FROM units WHERE paper_id = ? ORDER BY sequence",
+            """
+            SELECT units.id FROM units
+            JOIN papers ON papers.id = units.paper_id
+            WHERE units.paper_id = ? AND papers.deleted_at IS NULL
+            ORDER BY units.sequence
+            """,
             (request.paper_id,),
         ).fetchall()
         return [row["id"] for row in rows], request.paper_id
@@ -41,6 +57,19 @@ def _select_unit_ids(
     if request.mode == "unit":
         if not request.unit_ids:
             raise ValueError("请选择练习篇目")
+        placeholders = ",".join("?" for _ in request.unit_ids)
+        owned = connection.execute(
+            f"""
+            SELECT COUNT(*) AS count FROM units
+            JOIN papers ON papers.id = units.paper_id
+            WHERE units.id IN ({placeholders})
+              AND papers.profile_id = ?
+              AND papers.deleted_at IS NULL
+            """,
+            [*request.unit_ids, active_profile_id],
+        ).fetchone()["count"]
+        if owned != len(request.unit_ids):
+            raise ValueError("部分篇目不存在或不属于当前题库配置")
         return request.unit_ids, request.paper_id
 
     if request.mode == "random":
@@ -49,8 +78,10 @@ def _select_unit_ids(
             FROM units
             JOIN papers ON papers.id = units.paper_id
             WHERE papers.status = 'published'
+              AND papers.deleted_at IS NULL
+              AND papers.profile_id = ?
         """
-        params: list[Any] = []
+        params: list[Any] = [active_profile_id]
         if request.unit_type:
             query += " AND units.unit_type = ?"
             params.append(request.unit_type)
@@ -67,9 +98,13 @@ def _select_unit_ids(
             SELECT DISTINCT questions.unit_id
             FROM wrong_stats
             JOIN questions ON questions.id = wrong_stats.question_id
+            JOIN units ON units.id = questions.unit_id
+            JOIN papers ON papers.id = units.paper_id
             WHERE wrong_stats.wrong_count > 0
+              AND papers.profile_id = ?
+              AND papers.deleted_at IS NULL
         """
-        params = []
+        params = [active_profile_id]
         if request.unit_ids:
             placeholders = ",".join("?" for _ in request.unit_ids)
             query += f" AND questions.unit_id IN ({placeholders})"

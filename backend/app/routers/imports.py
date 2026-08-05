@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from ..config import UPLOAD_DIR
-from ..database import get_db
+from ..database import get_active_profile_id, get_db
 from ..schemas import DraftUpdate, ImportAnswersUpdate, ModelAssistRequest
 from ..services.docx_parser import (
     apply_answers_to_draft,
@@ -29,6 +29,7 @@ from ..services.import_assist import (
     run_model_assist,
 )
 from ..services.ai_client import get_ai_profile
+from ..services.trash import trash_import_job
 
 
 router = APIRouter(prefix="/imports", tags=["imports"])
@@ -66,14 +67,17 @@ def _model_identity(
 
 @router.get("")
 def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]:
+    profile_id = get_active_profile_id(connection)
     rows = connection.execute(
         """
-        SELECT id, filename, detected_year, detected_format, status,
+        SELECT id, profile_id, filename, detected_year, detected_format, status,
                warnings, parse_context, created_at, updated_at
         FROM import_jobs
-        WHERE detected_format <> 'esq-1.0' OR detected_format IS NULL
+        WHERE (detected_format <> 'esq-1.0' OR detected_format IS NULL)
+          AND profile_id = ? AND deleted_at IS NULL
         ORDER BY id DESC
-        """
+        """,
+        (profile_id,),
     ).fetchall()
     result = []
     for row in rows:
@@ -91,6 +95,7 @@ async def upload_import(
     use_model_assist: bool = Form(False),
     model_assist_correct_structure: bool = Form(False),
     defer_model_assist: bool = Form(False),
+    profile_id: int | None = Form(default=None),
     connection: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     import_started = time.perf_counter()
@@ -105,6 +110,12 @@ async def upload_import(
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name
     stored_answer_path: Path | None = None
+    selected_profile_id = profile_id or get_active_profile_id(connection)
+    if not connection.execute(
+        "SELECT 1 FROM question_bank_profiles WHERE id = ? AND deleted_at IS NULL",
+        (selected_profile_id,),
+    ).fetchone():
+        raise HTTPException(404, "目标题库配置不存在")
     with stored_path.open("wb") as target:
         shutil.copyfileobj(file.file, target)
     if answer_file and answer_file.filename:
@@ -215,20 +226,19 @@ async def upload_import(
         if stored_answer_path:
             stored_answer_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Word解析失败：{error}") from error
-    finally:
-        if stored_answer_path:
-            stored_answer_path.unlink(missing_ok=True)
-
     cursor = connection.execute(
         """
         INSERT INTO import_jobs
-            (filename, stored_path, detected_year, detected_format,
-             status, draft_data, warnings, parse_context)
-        VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)
+            (profile_id, filename, stored_path, answer_stored_path,
+             detected_year, detected_format, status, draft_data,
+             warnings, parse_context)
+        VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
         """,
         (
+            selected_profile_id,
             file.filename,
             str(stored_path),
+            str(stored_answer_path or ""),
             draft.get("year"),
             draft.get("detected_format"),
             json.dumps(draft, ensure_ascii=False),
@@ -243,6 +253,7 @@ async def upload_import(
         "draft": draft,
         "warnings": draft["warnings"],
         "model_assist": draft.get("model_assist"),
+        "profile_id": selected_profile_id,
     }
 
 
@@ -558,7 +569,12 @@ def publish(
     warnings = validate_draft(draft)
     if warnings and not force:
         raise HTTPException(409, {"message": "仍有校验问题", "warnings": warnings})
-    paper_id = publish_draft(connection, draft, row["filename"])
+    paper_id = publish_draft(
+        connection,
+        draft,
+        row["filename"],
+        profile_id=int(row["profile_id"]),
+    )
     try:
         parse_context = json.loads(row["parse_context"] or "{}")
     except json.JSONDecodeError:
@@ -596,3 +612,17 @@ def publish(
         "question_count": int(question_count or 0),
         "warnings": warnings,
     }
+
+
+@router.delete("/{job_id}")
+def delete_import(
+    job_id: int,
+    connection: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    try:
+        result = trash_import_job(connection, job_id)
+        connection.commit()
+        return {"trashed": True, **result}
+    except ValueError as error:
+        connection.rollback()
+        raise HTTPException(422, str(error)) from error

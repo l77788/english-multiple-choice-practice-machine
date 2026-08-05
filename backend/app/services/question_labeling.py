@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from typing import Any
 
+from ..database import get_active_profile_id
 from .ai_client import chat_completion, get_ai_profile, parse_json_response
 
 
@@ -33,7 +34,10 @@ def labeling_status(
     paper_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     params: list[Any] = []
-    conditions: list[str] = []
+    conditions: list[str] = ["p.deleted_at IS NULL"]
+    if not paper_ids:
+        conditions.append("p.profile_id = ?")
+        params.append(get_active_profile_id(connection))
     if year is not None:
         conditions.append("p.year = ?")
         params.append(year)
@@ -43,7 +47,7 @@ def labeling_status(
             f"p.id IN ({','.join('?' for _ in normalized_paper_ids)})"
         )
         params.extend(normalized_paper_ids)
-    scope_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    scope_clause = f"WHERE {' AND '.join(conditions)}"
     row = connection.execute(
         f"""
         SELECT COUNT(q.id) AS total,
@@ -59,12 +63,30 @@ def labeling_status(
         """,
         params,
     ).fetchone()
-    years = [
-        item["year"]
-        for item in connection.execute(
-            "SELECT DISTINCT year FROM papers ORDER BY year DESC"
-        ).fetchall()
-    ]
+    if normalized_paper_ids:
+        years = [
+            item["year"]
+            for item in connection.execute(
+                f"""
+                SELECT DISTINCT year FROM papers
+                WHERE id IN ({','.join('?' for _ in normalized_paper_ids)})
+                ORDER BY year DESC
+                """,
+                normalized_paper_ids,
+            ).fetchall()
+        ]
+    else:
+        years = [
+            item["year"]
+            for item in connection.execute(
+                """
+                SELECT DISTINCT year FROM papers
+                WHERE profile_id = ? AND deleted_at IS NULL
+                ORDER BY year DESC
+                """,
+                (get_active_profile_id(connection),),
+            ).fetchall()
+        ]
     total = int(row["total"] or 0)
     labeled = int(row["labeled"] or 0)
     return {
@@ -101,7 +123,11 @@ def _next_unit(
     conditions = [
         _eligible_condition(overwrite_unlocked),
         "ri.question_id IS NULL",
+        "p.deleted_at IS NULL",
     ]
+    if not paper_ids:
+        conditions.append("p.profile_id = ?")
+        params.append(get_active_profile_id(connection))
     if year is not None:
         conditions.append("p.year = ?")
         params.append(year)

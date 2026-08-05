@@ -546,7 +546,12 @@ def _validate_manifest(manifest: dict[str, Any], details: list[dict[str, str]]) 
         _error(details, "manifest.papers", "至少包含一套试卷")
 
 
-def build_preview(connection: Any, package: dict[str, Any]) -> dict[str, Any]:
+def build_preview(
+    connection: Any,
+    package: dict[str, Any],
+    *,
+    profile_id: int = 1,
+) -> dict[str, Any]:
     conflicts: list[dict[str, Any]] = []
     totals = {"papers": 0, "units": 0, "questions": 0, "assets": len(package.get("assets", {}))}
     for paper in package["papers"]:
@@ -554,8 +559,13 @@ def build_preview(connection: Any, package: dict[str, Any]) -> dict[str, Any]:
         totals["units"] += len(paper["units"])
         totals["questions"] += sum(len(unit["questions"]) for unit in paper["units"])
         existing = connection.execute(
-            "SELECT id, year, title, external_key, content_version FROM papers WHERE external_key = ? OR year = ?",
-            (paper["paperKey"], paper["year"]),
+            """
+            SELECT id, year, title, external_key, content_version
+            FROM papers
+            WHERE profile_id = ? AND deleted_at IS NULL AND external_key = ?
+            LIMIT 1
+            """,
+            (profile_id, paper["paperKey"]),
         ).fetchone()
         conflicts.append(
             {
@@ -682,6 +692,7 @@ def publish_package(
     resolutions: dict[str, str],
     *,
     import_ai_labels: bool = True,
+    profile_id: int = 1,
 ) -> dict[str, Any]:
     extracted_assets = _extract_assets(package, archive_path)
     manifest = package["manifest"]
@@ -695,8 +706,12 @@ def publish_package(
     for paper in package["papers"]:
         paper_key = _paper_external_key(paper)
         existing = connection.execute(
-            "SELECT * FROM papers WHERE external_key = ? OR year = ?",
-            (paper_key, paper["year"]),
+            """
+            SELECT * FROM papers
+            WHERE profile_id = ? AND deleted_at IS NULL AND external_key = ?
+            LIMIT 1
+            """,
+            (profile_id, paper_key),
         ).fetchone()
         action = resolutions.get(paper_key, "replace_with_imported" if existing else "import")
         if existing and action == "keep_existing":
@@ -717,12 +732,13 @@ def publish_package(
             connection.execute(
                 """
                 UPDATE papers
-                SET subject = ?, title = ?, source_file = ?,
+                SET profile_id = ?, subject = ?, title = ?, source_file = ?,
                     status = 'published', external_key = ?, package_id = ?,
                     content_version = ?, source_metadata = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
                 (
+                    profile_id,
                     paper.get("subject", manifest.get("subject", "")),
                     paper["title"],
                     manifest.get("source", {}).get("description", ""),
@@ -737,11 +753,12 @@ def publish_package(
             cursor = connection.execute(
                 """
                 INSERT INTO papers
-                    (year, subject, title, source_file, status, external_key,
+                    (profile_id, year, subject, title, source_file, status, external_key,
                      package_id, content_version, source_metadata)
-                VALUES (?, ?, ?, ?, 'published', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'published', ?, ?, ?, ?)
                 """,
                 (
+                    profile_id,
                     paper["year"],
                     paper.get("subject", manifest.get("subject", "")),
                     paper["title"],
@@ -1064,9 +1081,13 @@ def export_package(
     years: list[int] | None = None,
     include_answers: bool = True,
     include_labels: bool = False,
+    profile_id: int | None = None,
 ) -> tuple[bytes, str]:
-    query = "SELECT * FROM papers WHERE status = 'published'"
+    query = "SELECT * FROM papers WHERE status = 'published' AND deleted_at IS NULL"
     params: list[Any] = []
+    if profile_id is not None:
+        query += " AND profile_id = ?"
+        params.append(profile_id)
     if years:
         query += f" AND year IN ({','.join('?' for _ in years)})"
         params.extend(years)
