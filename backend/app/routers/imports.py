@@ -92,6 +92,7 @@ def list_imports(connection: sqlite3.Connection = Depends(get_db)) -> list[dict]
 async def upload_import(
     file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
+    audio_files: list[UploadFile] | None = File(default=None),
     use_model_assist: bool = Form(False),
     model_assist_correct_structure: bool = Form(False),
     defer_model_assist: bool = Form(False),
@@ -106,6 +107,15 @@ async def upload_import(
         or not answer_file.filename.lower().endswith((".docx", ".doc", ".pdf"))
     ):
         raise HTTPException(400, "答案文件仅支持 DOC、DOCX 或 PDF")
+    audio_paths: list[Path] = []
+    if audio_files:
+        for audio in audio_files:
+            if audio.filename and audio.filename.lower().endswith(".mp3"):
+                audio_name = f"{uuid.uuid4().hex}.mp3"
+                audio_path = UPLOAD_DIR / audio_name
+                with audio_path.open("wb") as target:
+                    shutil.copyfileobj(audio.file, target)
+                audio_paths.append(audio_path)
     suffix = Path(file.filename).suffix or ".docx"
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name
@@ -145,6 +155,7 @@ async def upload_import(
             answer_path=stored_answer_path,
             source_name=file.filename,
             answer_name=answer_file.filename if answer_file else None,
+            audio_paths=audio_paths if audio_paths else None,
         )
         diagnostics.update(
             {
@@ -166,6 +177,8 @@ async def upload_import(
             if companion:
                 answer_text = extract_attachment_text(companion)
         parse_context["answer_text"] = answer_text[:20000]
+        if audio_paths:
+            parse_context["audio_paths"] = [str(p) for p in audio_paths]
         diagnostics["answer_text_chars"] = len(parse_context["answer_text"])
         draft["import_diagnostics"] = diagnostics
         if use_model_assist and not defer_model_assist:

@@ -1203,6 +1203,17 @@ def parse_exam(
         subject = _detect_subject(logical_source_name, blocks)
         from .exam_templates import detect_exam_type, template_units, template_subject_default, template_answer_numbers
         detected_exam_type = exam_type or detect_exam_type(" ".join(blocks[:15]), logical_source_name)
+        exam_month = 0
+        set_number = 1
+        month_match = re.search(r"(\d{1,2})\s*月", logical_source_name)
+        if not month_match:
+            month_match = re.search(r"(?:20\d{2}|^|[._-])\s*(\d{1,2})\s*(?:月|四级|六级)", logical_source_name)
+        if month_match:
+            exam_month = int(month_match.group(1))
+        set_match = re.search(r"第\s*([一二三1-3])\s*套", logical_source_name)
+        if set_match:
+            chinese = {"一": 1, "二": 2, "三": 3}
+            set_number = chinese.get(set_match.group(1)) or int(set_match.group(1))
         if detected_exam_type and detected_exam_type != "postgraduate_english1":
             subject = template_subject_default(detected_exam_type) or subject
         exam_units = template_units(detected_exam_type)
@@ -1314,6 +1325,8 @@ def parse_exam(
             "year": year,
             "subject": subject,
             "exam_type": detected_exam_type,
+            "exam_month": exam_month,
+            "set_number": set_number,
             "title": (
                 f"{year}年{subject}真题"
                 if year
@@ -1458,19 +1471,26 @@ def publish_draft(
             UPDATE papers
             SET year = ?, subject = ?, title = ?, source_file = ?,
                 status = 'published', external_key = ?,
+                exam_type = ?, exam_month = ?, set_number = ?, session_group_key = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (year, subject, draft["title"], source_file, external_key, paper_id),
+            (year, subject, draft["title"], source_file, external_key,
+             draft.get("exam_type", ""), draft.get("exam_month", 0),
+             draft.get("set_number", 1), draft.get("session_group_key", ""),
+             paper_id),
         )
     else:
         cursor = connection.execute(
             """
             INSERT INTO papers
-                (profile_id, year, subject, title, source_file, status, external_key)
-            VALUES (?, ?, ?, ?, ?, 'published', ?)
+                (profile_id, year, subject, title, source_file, status, external_key,
+                 exam_type, exam_month, set_number, session_group_key)
+            VALUES (?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?)
             """,
-            (profile_id, year, subject, draft["title"], source_file, external_key),
+            (profile_id, year, subject, draft["title"], source_file, external_key,
+             draft.get("exam_type", ""), draft.get("exam_month", 0),
+             draft.get("set_number", 1), draft.get("session_group_key", "")),
         )
         paper_id = int(cursor.lastrowid)
     connection.execute("DELETE FROM units WHERE paper_id = ?", (paper_id,))
