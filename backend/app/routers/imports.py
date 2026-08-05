@@ -39,6 +39,7 @@ from ..services.trash import trash_import_job
 
 router = APIRouter(prefix="/imports", tags=["imports"])
 IMPORT_PIPELINE_REVISION = "word-import-2026.08.05.multi-paper.1"
+ALLOWED_AUDIO_SUFFIXES = {".mp3", ".m4a", ".wav", ".ogg"}
 
 
 def _job_scope_payload(parse_context: str | None) -> dict[str, Any]:
@@ -147,6 +148,7 @@ def _build_uploaded_draft(
         "answer_file_count": len(selected_answer_files),
         "answer_file_name": selected_answer_files[0].filename if selected_answer_files else "",
         "answer_file_names": [item.filename for item in selected_answer_files if item.filename],
+        "audio_file_count": len(audio_paths),
         "model_call_status": (
             "deferred"
             if use_model_assist and defer_model_assist
@@ -278,6 +280,7 @@ async def upload_import(
     file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
     answer_files: list[UploadFile] | None = File(default=None),
+    audio_file: UploadFile | None = File(default=None),
     audio_files: list[UploadFile] | None = File(default=None),
     use_model_assist: bool = Form(False),
     model_assist_correct_structure: bool = Form(False),
@@ -303,15 +306,22 @@ async def upload_import(
             (".docx", ".doc", ".pdf")
         ):
             raise HTTPException(400, "答案文件仅支持 DOC、DOCX 或 PDF")
+    selected_audio_files = [
+        item
+        for item in ([audio_file] if audio_file else []) + list(audio_files or [])
+        if item and item.filename
+    ]
+    for audio in selected_audio_files:
+        suffix = Path(audio.filename or "").suffix.lower()
+        if suffix not in ALLOWED_AUDIO_SUFFIXES:
+            raise HTTPException(400, "听力音频仅支持 MP3、M4A、WAV 或 OGG")
     audio_paths: list[Path] = []
-    if audio_files:
-        for audio in audio_files:
-            if audio.filename and audio.filename.lower().endswith(".mp3"):
-                audio_name = f"{uuid.uuid4().hex}.mp3"
-                audio_path = UPLOAD_DIR / audio_name
-                with audio_path.open("wb") as target:
-                    shutil.copyfileobj(audio.file, target)
-                audio_paths.append(audio_path)
+    for audio in selected_audio_files:
+        suffix = Path(audio.filename or "").suffix.lower() or ".mp3"
+        audio_path = UPLOAD_DIR / f"{uuid.uuid4().hex}{suffix}"
+        with audio_path.open("wb") as target:
+            shutil.copyfileobj(audio.file, target)
+        audio_paths.append(audio_path)
     suffix = Path(file.filename).suffix or ".docx"
     stored_name = f"{uuid.uuid4().hex}{suffix}"
     stored_path = UPLOAD_DIR / stored_name

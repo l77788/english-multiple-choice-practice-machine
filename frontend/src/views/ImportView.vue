@@ -55,8 +55,10 @@ const jobs = ref<any[]>([])
 const current = ref<any>(null)
 const selectedFile = ref<File | null>(null)
 const selectedAnswerFiles = ref<File[]>([])
+const selectedAudioFiles = ref<File[]>([])
 const useModelAssist = ref(true)
 const modelAssistRewrite = ref(false)
+const importConfirmOpen = ref(false)
 const assistDialogOpen = ref(false)
 const assistError = ref('')
 const assistBusy = ref(false)
@@ -290,6 +292,11 @@ async function handleProfileChanged() {
 
 async function upload() {
   if (!selectedFile.value) return
+  if (!importConfirmOpen.value) {
+    importConfirmOpen.value = true
+    return
+  }
+  importConfirmOpen.value = false
   busy.value = true; error.value = ''; notice.value = ''
   uploadStage.value = '正在上传并解析 Word 与答案附件'
   uploadElapsedSeconds.value = 0
@@ -297,6 +304,7 @@ async function upload() {
   const form = new FormData(); form.append('file', selectedFile.value)
   form.append('profile_id', String(targetProfileId.value))
   selectedAnswerFiles.value.forEach(file => form.append('answer_files', file))
+  selectedAudioFiles.value.forEach(file => form.append('audio_files', file))
   form.append('use_model_assist', useModelAssist.value ? 'true' : 'false')
   form.append('model_assist_correct_structure', modelAssistRewrite.value ? 'true' : 'false')
   form.append('defer_model_assist', useModelAssist.value ? 'true' : 'false')
@@ -685,6 +693,7 @@ async function exportEsq(includeLabels = false) {
           </label>
           <label class="field"><span>试卷 Word / 文本型 PDF（必选）</span><input type="file" accept=".doc,.docx,.pdf" @change="selectedFile=($event.target as HTMLInputElement).files?.[0] || null"></label>
           <label class="field"><span>答案附件（可多选）</span><input type="file" accept=".doc,.docx,.pdf" multiple @change="selectedAnswerFiles=Array.from(($event.target as HTMLInputElement).files || [])"><small v-if="selectedAnswerFiles.length">已选择 {{ selectedAnswerFiles.length }} 份答案附件</small></label>
+          <label class="field"><span>听力音频（可多选，支持 MP3 / M4A / WAV / OGG）</span><input type="file" accept=".mp3,.m4a,.wav,.ogg,audio/mpeg,audio/mp4,audio/wav,audio/ogg" multiple @change="selectedAudioFiles=Array.from(($event.target as HTMLInputElement).files || [])"><small v-if="selectedAudioFiles.length">已选择 {{ selectedAudioFiles.length }} 个音频文件</small></label>
           <label class="import-assist-toggle">
             <input v-model="useModelAssist" type="checkbox">
             <span>上传解析时用模型辅助定位题目与对应答案（默认开启）</span>
@@ -930,6 +939,19 @@ async function exportEsq(includeLabels = false) {
             <button class="button ghost" @click="showModelSelector=false">返回</button>
             <button class="button" :disabled="!selectedModelKey || assistBusy" @click="retryAssist">{{ assistBusy ? '正在解析…' : '使用该模型重试' }}</button>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="importConfirmOpen" class="review-overlay" role="dialog" aria-modal="true" aria-labelledby="single-import-title">
+      <div class="review-card import-assist-dialog">
+        <h3 id="single-import-title" style="margin-bottom:10px">确认开始导入</h3>
+        <p class="lead" style="font-size:13px;line-height:1.7">
+          当前一次只允许导入一套题目。同一个 Word / PDF 文件如果包含多套真题，系统只会默认生成并导入第 1 套，其余套次会被忽略。
+        </p>
+        <div style="display:flex;gap:10px;margin-top:20px;justify-content:center">
+          <button class="button ghost" type="button" @click="importConfirmOpen=false">取消</button>
+          <button class="button" type="button" @click="upload">确认导入第 1 套</button>
         </div>
       </div>
     </div>
