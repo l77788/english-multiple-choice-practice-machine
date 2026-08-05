@@ -1035,6 +1035,7 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     apply_answers_to_draft(draft)
     answers = draft["answers"]
+    from .exam_templates import template_units
     expected_numbers = objective_question_numbers(draft)
     missing_answers = [
         number for number in expected_numbers if not answers.get(str(number))
@@ -1047,25 +1048,35 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
     ):
         warnings.append("自动识别的标准答案尚未人工确认")
     units = draft["units"]
-    cloze = next((unit for unit in units if unit["unit_type"] == "cloze"), None)
-    if not cloze or len(cloze["questions"]) != 20:
-        warnings.append("完型填空未识别为20题")
-    elif any(len(question["options"]) != 4 for question in cloze["questions"]):
-        bad = [
-            question["number"]
-            for question in cloze["questions"]
-            if len(question["options"]) != 4
-        ]
-        warnings.append(f"完型填空选项数量异常：{bad}")
-    readings = [unit for unit in units if unit["unit_type"] == "reading"]
-    if len(readings) != 4:
-        warnings.append(f"阅读文章应为4篇，当前为{len(readings)}篇")
-    for unit in readings:
-        if len(unit["questions"]) != 5:
-            warnings.append(f"{unit['title']} 未识别为5题")
-        for question in unit["questions"]:
-            if len(question["options"]) != 4:
-                warnings.append(f"第{question['number']}题选项数量不是4")
+    exam_type = draft.get("exam_type", "postgraduate_english1")
+    expected_template = template_units(exam_type)
+    if expected_template:
+        template_by_type: dict[str, dict[str, Any]] = {}
+        for t in expected_template:
+            key = t["type"]
+            template_by_type[key] = t
+        actual_by_type: dict[str, list[dict[str, Any]]] = {}
+        for u in units:
+            actual_by_type.setdefault(u["unit_type"], []).append(u)
+        for template in expected_template:
+            matches = [u for u in units if u["unit_type"] == template["type"]]
+            if not matches:
+                if template["type"] == "part_b":
+                    continue
+                warnings.append(f"缺少{template['title']}")
+                continue
+            for unit in matches:
+                expected_q_count = len(list(template["numbers"]))
+                if len(unit["questions"]) != expected_q_count:
+                    warnings.append(f"{unit['title']} 题目数 {len(unit['questions'])} 应为 {expected_q_count} 题")
+                if unit["unit_type"] not in ("listening", "word_bank", "paragraph_matching"):
+                    for question in unit["questions"]:
+                        if len(question.get("options", [])) != 4:
+                            warnings.append(f"第{question['number']}题选项数量不是4")
+    else:
+        cloze = next((unit for unit in units if unit["unit_type"] == "cloze"), None)
+        if not cloze or len(cloze["questions"]) != 20:
+            warnings.append("完型填空未识别为20题")
     part_b_units = [unit for unit in units if unit["unit_type"] == "part_b"]
     if part_b_units:
         part_b = part_b_units[0]
@@ -1089,9 +1100,6 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
             )
         ):
             warnings.append("Part B 标准答案未能对应候选项")
-    expected_units = 5 + (1 if part_b_units else 0)
-    if len(units) != expected_units:
-        warnings.append(f"应识别{expected_units}个客观题练习单元，当前为{len(units)}个")
     for unit in units:
         for question in unit["questions"]:
             if not question.get("answer"):
@@ -1104,12 +1112,86 @@ def validate_draft(draft: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
+def _parse_template_known(
+    blocks: list[str],
+    answer_key: dict[int, str],
+    unit_type: str,
+    unit_subtype: str,
+    unit_title: str,
+    unit_seq: int,
+    unit_numbers: list[int],
+) -> dict[str, Any]:
+    """Use existing cloze/reading/part_b parsers for template-guided units."""
+    if unit_type == "cloze":
+        unit = _parse_cloze(blocks, answer_key)
+        unit["subtype"] = unit_subtype
+        unit["title"] = unit_title
+        unit["sequence"] = unit_seq
+        return unit
+    if unit_type == "reading":
+        readings = _parse_reading(blocks, answer_key)
+        idx = unit_seq - 2
+        if 0 <= idx < len(readings):
+            unit = readings[idx]
+            unit["title"] = unit_title
+            unit["sequence"] = unit_seq
+            return unit
+        return _create_template_shell(unit_type, unit_subtype, unit_title, unit_seq, unit_numbers, answer_key)
+    if unit_type == "part_b":
+        if _has_objective_part_b(blocks):
+            unit = _parse_part_b(blocks, answer_key)
+            unit["title"] = unit_title
+            unit["sequence"] = unit_seq
+            return unit
+        return _create_template_shell(unit_type, unit_subtype, unit_title, unit_seq, unit_numbers, answer_key)
+    return _create_template_shell(unit_type, unit_subtype, unit_title, unit_seq, unit_numbers, answer_key)
+
+
+def _create_template_shell(
+    unit_type: str,
+    unit_subtype: str,
+    unit_title: str,
+    unit_seq: int,
+    unit_numbers: list[int],
+    answer_key: dict[int, str],
+) -> dict[str, Any]:
+    """Create a unit shell for exam types that don't have specialized parsers (listening, word_bank, etc)."""
+    options: list[dict[str, str]] = [
+        {"key": "A", "content": ""},
+        {"key": "B", "content": ""},
+        {"key": "C", "content": ""},
+        {"key": "D", "content": ""},
+    ]
+    questions = [
+        {
+            "number": num,
+            "stem": "",
+            "answer": answer_key.get(num, ""),
+            "score": 1.0,
+            "question_type": "single_choice",
+            "options": options,
+        }
+        for num in unit_numbers
+    ]
+    return {
+        "unit_type": unit_type,
+        "subtype": unit_subtype,
+        "title": unit_title,
+        "sequence": unit_seq,
+        "passage": "",
+        "shared_data": {},
+        "questions": questions,
+    }
+
+
 def parse_exam(
     path: Path,
     answer_path: Path | None = None,
     *,
     source_name: str | None = None,
     answer_name: str | None = None,
+    exam_type: str = "",
+    audio_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     blocks, detected_format, converted = extract_blocks(path)
     try:
@@ -1119,6 +1201,13 @@ def parse_exam(
             year_match = re.search(r"(20\d{2})", " ".join(blocks[:10]))
         year = int(year_match.group(1)) if year_match else None
         subject = _detect_subject(logical_source_name, blocks)
+        from .exam_templates import detect_exam_type, template_units, template_subject_default, template_answer_numbers
+        detected_exam_type = exam_type or detect_exam_type(" ".join(blocks[:15]), logical_source_name)
+        if detected_exam_type and detected_exam_type != "postgraduate_english1":
+            subject = template_subject_default(detected_exam_type) or subject
+        exam_units = template_units(detected_exam_type)
+        if not exam_units:
+            exam_units = template_units("postgraduate_english1")
         answer_key = extract_answer_key(blocks)
         answer_sources = {
             str(number): "试卷 Word 内置答案" for number in answer_key
@@ -1159,10 +1248,24 @@ def parse_exam(
                     answer_status = attachment_status
                     answer_source = legacy_companion.name
                     attachment_used = True
-        units = [_parse_cloze(blocks, answer_key)]
-        units.extend(_parse_reading(blocks, answer_key))
-        if _has_objective_part_b(blocks):
-            units.append(_parse_part_b(blocks, answer_key))
+        units: list[dict[str, Any]] = []
+        if detected_exam_type in ("postgraduate_english1", "postgraduate_english2"):
+            units = [_parse_cloze(blocks, answer_key)]
+            units.extend(_parse_reading(blocks, answer_key))
+            if _has_objective_part_b(blocks):
+                units.append(_parse_part_b(blocks, answer_key))
+        else:
+            for template_unit in exam_units:
+                unit_type = template_unit["type"]
+                unit_subtype = template_unit["subtype"]
+                unit_title = template_unit["title"]
+                unit_seq = template_unit["seq"]
+                unit_numbers = list(template_unit["numbers"])
+                if unit_type in ("cloze", "reading", "part_b"):
+                    unit = _parse_template_known(blocks, answer_key, unit_type, unit_subtype, unit_title, unit_seq, unit_numbers)
+                else:
+                    unit = _create_template_shell(unit_type, unit_subtype, unit_title, unit_seq, unit_numbers, answer_key)
+                units.append(unit)
         expected_numbers = {
             question["number"]
             for unit in units
@@ -1182,10 +1285,13 @@ def parse_exam(
             for question in unit.get("questions", []):
                 question["answer"] = answer_key.get(question["number"], "")
         for unit in units:
-            if unit["unit_type"] == "cloze":
+            if unit["unit_type"] in ("cloze", "word_bank"):
                 unit["passage"] = _ensure_numbered_blanks(
                     unit.get("passage", ""),
-                    range(1, 21),
+                    range(
+                        min(q["number"] for q in unit.get("questions", [{"number":1}])),
+                        max(q["number"] for q in unit.get("questions", [{"number":20}])) + 1,
+                    ),
                 )
                 unit["passage"] = _remove_duplicate_cloze_number_noise(
                     unit["passage"]
@@ -1196,7 +1302,10 @@ def parse_exam(
             elif unit["unit_type"] == "part_b":
                 unit["passage"] = _ensure_numbered_blanks(
                     unit.get("passage", ""),
-                    range(41, 46),
+                    range(
+                        min(q["number"] for q in unit.get("questions", [{"number":41}])),
+                        max(q["number"] for q in unit.get("questions", [{"number":45}])) + 1,
+                    ),
                 )
                 unit["passage"] = repair_inline_blank_paragraph_breaks(
                     unit["passage"]
@@ -1204,8 +1313,9 @@ def parse_exam(
         draft = {
             "year": year,
             "subject": subject,
+            "exam_type": detected_exam_type,
             "title": (
-                f"{year}年考研{subject}真题"
+                f"{year}年{subject}真题"
                 if year
                 else Path(logical_source_name).stem
             ),

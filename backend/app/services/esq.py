@@ -317,8 +317,8 @@ def _validate_paper(
             _error(details, f"{path}.unitKey", "单元 ID 重复")
         unit_keys.add(unit_key)
         unit_type = unit.get("type")
-        if unit_type not in {"cloze", "reading", "part_b"}:
-            _error(details, f"{path}.type", "仅支持 cloze、reading、part_b")
+        if unit_type not in {"cloze", "reading", "part_b", "listening", "word_bank", "paragraph_matching"}:
+            _error(details, f"{path}.type", "不支持该题型")
         passage = unit.get("passage")
         if not isinstance(passage, dict):
             _error(details, f"{path}.passage", "必须是对象")

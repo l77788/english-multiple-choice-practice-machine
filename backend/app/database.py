@@ -578,6 +578,10 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "vocabulary_entries", "synonyms", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(connection, "vocabulary_entries", "antonyms", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(connection, "vocabulary_entries", "similar_forms", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column(connection, "papers", "exam_type", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "papers", "exam_month", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "papers", "set_number", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(connection, "papers", "session_group_key", "TEXT NOT NULL DEFAULT ''")
     connection.execute(
         """
         UPDATE vocabulary_entries
@@ -628,6 +632,10 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
                 year INTEGER NOT NULL,
                 subject TEXT NOT NULL DEFAULT '英语一',
                 title TEXT NOT NULL,
+                exam_type TEXT NOT NULL DEFAULT '',
+                exam_month INTEGER NOT NULL DEFAULT 0,
+                set_number INTEGER NOT NULL DEFAULT 1,
+                session_group_key TEXT NOT NULL DEFAULT '',
                 source_file TEXT,
                 status TEXT NOT NULL DEFAULT 'draft',
                 external_key TEXT,
@@ -645,9 +653,10 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
             """
             INSERT INTO papers_rebuild
                 (id, profile_id, year, subject, title, source_file, status,
+                 exam_type, exam_month, set_number, session_group_key,
                  external_key, package_id, content_version, source_metadata,
                  deleted_at, created_at, updated_at)
-            SELECT id, profile_id, year, subject, title, source_file, status,
+            SELECT id, profile_id, year, subject, title, source_file, status, '', 0, 1, '',
                    external_key, package_id, content_version, source_metadata,
                    deleted_at, created_at, updated_at
             FROM papers_rebuild_tmp_papers
