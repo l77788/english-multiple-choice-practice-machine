@@ -90,6 +90,36 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
         """,
         (profile_id,),
     ).fetchall()
+    unit_type_counts = {
+        str(row["unit_type"]): int(row["count"])
+        for row in connection.execute(
+            """
+            SELECT units.unit_type, COUNT(*) AS count
+            FROM units
+            JOIN papers ON papers.id = units.paper_id
+            WHERE papers.profile_id = ?
+              AND papers.status = 'published'
+              AND papers.deleted_at IS NULL
+            GROUP BY units.unit_type
+            """,
+            (profile_id,),
+        ).fetchall()
+    }
+    paper_type_counts = {
+        str(row["unit_type"]): int(row["count"])
+        for row in connection.execute(
+            """
+            SELECT units.unit_type, COUNT(DISTINCT papers.id) AS count
+            FROM units
+            JOIN papers ON papers.id = units.paper_id
+            WHERE papers.profile_id = ?
+              AND papers.status = 'published'
+              AND papers.deleted_at IS NULL
+            GROUP BY units.unit_type
+            """,
+            (profile_id,),
+        ).fetchall()
+    }
     return {
         "active_profile": dict(profile) if profile else None,
         "paper_count": paper_count,
@@ -97,5 +127,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
         "question_count": question_count,
         "wrong_count": wrong_count,
         "frequent_count": frequent_count,
+        "unit_type_counts": unit_type_counts,
+        "paper_type_counts": paper_type_counts,
         "recent_sessions": [dict(row) for row in recent],
     }

@@ -135,6 +135,89 @@ class ListeningAssetTests(unittest.TestCase):
         self.assertEqual(repaired, 1)
         self.assertEqual(shared["audio_tracks"][0]["media_type"], "audio/wav")
 
+    def test_multiple_audio_tracks_are_mapped_to_listening_sections(self) -> None:
+        from backend.app.database import connect
+        from backend.app.services.listening import attach_listening_assets
+
+        audio_files = []
+        for index in range(1, 4):
+            audio = Path(self.temp.name) / f"section-{index}.mp3"
+            audio.write_bytes(f"ID3-section-{index}".encode())
+            audio_files.append(audio)
+
+        with connect() as connection:
+            paper_id, _ = self._paper_with_unit(connection, year=2093)
+            for sequence, title in ((2, "听力 Section B"), (3, "听力 Section C")):
+                connection.execute(
+                    """
+                    INSERT INTO units
+                        (paper_id, unit_type, subtype, title, sequence, passage, shared_data)
+                    VALUES (?, 'listening', 'passage', ?, ?, '', '{}')
+                    """,
+                    (paper_id, title, sequence),
+                )
+            attach_listening_assets(
+                connection,
+                paper_id,
+                audio_files,
+                [path.name for path in audio_files],
+            )
+            rows = connection.execute(
+                """
+                SELECT shared_data FROM units
+                WHERE paper_id = ? AND unit_type = 'listening'
+                ORDER BY sequence
+                """,
+                (paper_id,),
+            ).fetchall()
+
+        payloads = [json.loads(row["shared_data"]) for row in rows]
+        self.assertEqual(
+            [payload["audio_tracks"][0]["asset_id"] for payload in payloads],
+            ["listening.track.1", "listening.track.2", "listening.track.3"],
+        )
+        self.assertTrue(
+            all(payload["audio_mode"] == "per_unit" for payload in payloads)
+        )
+
+    def test_complete_listening_practice_selects_all_sections_of_one_paper(self) -> None:
+        from backend.app.database import connect
+        from backend.app.routers.dashboard import dashboard
+        from backend.app.schemas import PracticeCreate
+        from backend.app.services.practice import create_session
+
+        with connect() as connection:
+            paper_id, _ = self._paper_with_unit(connection, year=2094)
+            for sequence, title in ((2, "听力 Section B"), (3, "听力 Section C")):
+                connection.execute(
+                    """
+                    INSERT INTO units
+                        (paper_id, unit_type, subtype, title, sequence, passage, shared_data)
+                    VALUES (?, 'listening', 'passage', ?, ?, '', '{}')
+                    """,
+                    (paper_id, title, sequence),
+                )
+            session = create_session(
+                connection,
+                PracticeCreate(
+                    mode="random",
+                    paper_id=paper_id,
+                    unit_type="listening",
+                    selection_scope="paper_unit_type",
+                    count=1,
+                    shuffle_options=True,
+                ),
+            )
+            overview = dashboard(connection)
+
+        self.assertEqual(session["paper_id"], paper_id)
+        self.assertEqual(len(session["units"]), 3)
+        self.assertTrue(
+            all(unit["unit_type"] == "listening" for unit in session["units"])
+        )
+        self.assertGreaterEqual(overview["paper_type_counts"]["listening"], 1)
+        self.assertGreaterEqual(overview["unit_type_counts"]["listening"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
