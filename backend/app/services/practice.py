@@ -106,9 +106,10 @@ def _select_unit_ids(
             return [int(row["id"]) for row in unit_rows], selected_paper_id
 
         query = """
-            SELECT units.id
+            SELECT DISTINCT units.id
             FROM units
             JOIN papers ON papers.id = units.paper_id
+            JOIN questions ON questions.unit_id = units.id
             WHERE papers.status = 'published'
               AND papers.deleted_at IS NULL
               AND papers.profile_id = ?
@@ -178,7 +179,7 @@ def create_session(
 ) -> dict[str, Any]:
     unit_ids, paper_id = _select_unit_ids(connection, request)
     if not unit_ids:
-        raise ValueError("没有符合条件的练习篇目")
+        raise LookupError("当前题库配置中没有已发布且包含题目的练习篇目")
 
     cursor = connection.execute(
         """

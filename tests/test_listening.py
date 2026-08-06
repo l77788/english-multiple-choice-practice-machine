@@ -230,6 +230,44 @@ class ListeningAssetTests(unittest.TestCase):
         self.assertGreaterEqual(overview["paper_type_counts"]["listening"], 1)
         self.assertGreaterEqual(overview["unit_type_counts"]["listening"], 3)
 
+    def test_random_practice_ignores_units_without_questions(self) -> None:
+        from backend.app.database import connect
+        from backend.app.schemas import PracticeCreate
+        from backend.app.services.practice import create_session
+
+        with connect() as connection:
+            paper_id, unit_id = self._paper_with_unit(connection, year=2095)
+            connection.execute(
+                """
+                INSERT INTO units
+                    (paper_id, unit_type, subtype, title, sequence, passage, shared_data)
+                VALUES (?, 'listening', 'passage', 'empty section', 2, '', '{}')
+                """,
+                (paper_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO questions
+                    (unit_id, number, stem, answer, score, sequence)
+                VALUES (?, 1, 'question', 'A', 1, 1)
+                """,
+                (unit_id,),
+            )
+            session = create_session(
+                connection,
+                PracticeCreate(
+                    mode="random",
+                    paper_id=paper_id,
+                    unit_type="listening",
+                    selection_scope="unit",
+                    count=1,
+                    shuffle_options=True,
+                ),
+            )
+
+        self.assertEqual(session["units"][0]["id"], unit_id)
+        self.assertEqual(session["progress"]["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
