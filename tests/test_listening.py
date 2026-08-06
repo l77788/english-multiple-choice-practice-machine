@@ -197,6 +197,18 @@ class ListeningAssetTests(unittest.TestCase):
                     """,
                     (paper_id, title, sequence),
                 )
+            for unit in connection.execute(
+                "SELECT id FROM units WHERE paper_id = ? ORDER BY sequence",
+                (paper_id,),
+            ).fetchall():
+                connection.execute(
+                    """
+                    INSERT INTO questions
+                        (unit_id, number, stem, answer, score, sequence)
+                    VALUES (?, 1, '听力题', 'A', 1, 1)
+                    """,
+                    (unit["id"],),
+                )
             session = create_session(
                 connection,
                 PracticeCreate(

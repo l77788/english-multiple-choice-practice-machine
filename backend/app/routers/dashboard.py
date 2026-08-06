@@ -97,6 +97,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
             SELECT units.unit_type, COUNT(*) AS count
             FROM units
             JOIN papers ON papers.id = units.paper_id
+            JOIN questions ON questions.unit_id = units.id
             WHERE papers.profile_id = ?
               AND papers.status = 'published'
               AND papers.deleted_at IS NULL
@@ -112,6 +113,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
             SELECT units.unit_type, COUNT(DISTINCT papers.id) AS count
             FROM units
             JOIN papers ON papers.id = units.paper_id
+            JOIN questions ON questions.unit_id = units.id
             WHERE papers.profile_id = ?
               AND papers.status = 'published'
               AND papers.deleted_at IS NULL

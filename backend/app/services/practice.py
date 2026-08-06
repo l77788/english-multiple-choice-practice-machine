@@ -80,6 +80,7 @@ def _select_unit_ids(
                 SELECT DISTINCT papers.id
                 FROM papers
                 JOIN units ON units.paper_id = papers.id
+                JOIN questions ON questions.unit_id = units.id
                 WHERE papers.status = 'published'
                   AND papers.deleted_at IS NULL
                   AND papers.profile_id = ?
