@@ -5,6 +5,7 @@ import sqlite3
 from fastapi import APIRouter, Depends
 
 from ..database import get_active_profile_id, get_db
+from ..services.listening import listening_unit_has_audio_sql
 
 
 router = APIRouter(tags=["dashboard"])
@@ -90,10 +91,11 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
         """,
         (profile_id,),
     ).fetchall()
+    listening_audio_condition = listening_unit_has_audio_sql("units")
     unit_type_counts = {
         str(row["unit_type"]): int(row["count"])
         for row in connection.execute(
-            """
+            f"""
             SELECT units.unit_type, COUNT(*) AS count
             FROM units
             JOIN papers ON papers.id = units.paper_id
@@ -101,6 +103,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
             WHERE papers.profile_id = ?
               AND papers.status = 'published'
               AND papers.deleted_at IS NULL
+              AND (units.unit_type <> 'listening' OR ({listening_audio_condition}))
             GROUP BY units.unit_type
             """,
             (profile_id,),
@@ -109,7 +112,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
     paper_type_counts = {
         str(row["unit_type"]): int(row["count"])
         for row in connection.execute(
-            """
+            f"""
             SELECT units.unit_type, COUNT(DISTINCT papers.id) AS count
             FROM units
             JOIN papers ON papers.id = units.paper_id
@@ -117,6 +120,7 @@ def dashboard(connection: sqlite3.Connection = Depends(get_db)) -> dict:
             WHERE papers.profile_id = ?
               AND papers.status = 'published'
               AND papers.deleted_at IS NULL
+              AND (units.unit_type <> 'listening' OR ({listening_audio_condition}))
             GROUP BY units.unit_type
             """,
             (profile_id,),

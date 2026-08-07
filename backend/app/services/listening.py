@@ -19,6 +19,16 @@ MEDIA_TYPES = {
 }
 
 
+def listening_unit_has_audio_sql(unit_alias: str = "units") -> str:
+    """Return the shared eligibility predicate used by dashboard and practice."""
+
+    return f"""
+        json_valid({unit_alias}.shared_data)
+        AND json_type({unit_alias}.shared_data, '$.audio_tracks') = 'array'
+        AND json_array_length({unit_alias}.shared_data, '$.audio_tracks') > 0
+    """
+
+
 def _safe_audio_name(name: str, index: int, suffix: str) -> str:
     label = Path(name).stem.strip()
     return label[:80] if label else f"听力音频 {index}"

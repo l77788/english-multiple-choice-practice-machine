@@ -9,6 +9,7 @@ from typing import Any
 from ..database import get_active_profile_id
 from ..schemas import PracticeCreate
 from .questions import parse_json, serialize_unit
+from .listening import listening_unit_has_audio_sql
 
 
 class IncompleteSubmissionError(ValueError):
@@ -87,6 +88,8 @@ def _select_unit_ids(
                   AND units.unit_type = ?
             """
             paper_params: list[Any] = [active_profile_id, request.unit_type]
+            if request.unit_type == "listening":
+                paper_query += f" AND ({listening_unit_has_audio_sql('units')})"
             if request.paper_id:
                 paper_query += " AND papers.id = ?"
                 paper_params.append(request.paper_id)
@@ -118,6 +121,8 @@ def _select_unit_ids(
         if request.unit_type:
             query += " AND units.unit_type = ?"
             params.append(request.unit_type)
+            if request.unit_type == "listening":
+                query += f" AND ({listening_unit_has_audio_sql('units')})"
         if request.paper_id:
             query += " AND units.paper_id = ?"
             params.append(request.paper_id)

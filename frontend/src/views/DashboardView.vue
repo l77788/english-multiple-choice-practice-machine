@@ -62,6 +62,9 @@ async function loadHome() {
   error.value = ''
   const embedded = (window as any).__LINJIAN_STARTUP__
   if (embedded) {
+    // The injected payload only accelerates the first paint. Profile changes
+    // must fetch fresh counts for the newly active question bank.
+    delete (window as any).__LINJIAN_STARTUP__
     data.value = embedded
     try {
       const words: any = await get('/vocabulary/home?limit=20')

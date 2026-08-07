@@ -184,8 +184,11 @@ class ListeningAssetTests(unittest.TestCase):
         from backend.app.database import connect
         from backend.app.routers.dashboard import dashboard
         from backend.app.schemas import PracticeCreate
+        from backend.app.services.listening import attach_listening_assets
         from backend.app.services.practice import create_session
 
+        audio = Path(self.temp.name) / "complete-listening.mp3"
+        audio.write_bytes(b"ID3-complete-listening")
         with connect() as connection:
             paper_id, _ = self._paper_with_unit(connection, year=2094)
             for sequence, title in ((2, "听力 Section B"), (3, "听力 Section C")):
@@ -209,6 +212,7 @@ class ListeningAssetTests(unittest.TestCase):
                     """,
                     (unit["id"],),
                 )
+            attach_listening_assets(connection, paper_id, [audio], [audio.name])
             session = create_session(
                 connection,
                 PracticeCreate(
@@ -230,11 +234,168 @@ class ListeningAssetTests(unittest.TestCase):
         self.assertGreaterEqual(overview["paper_type_counts"]["listening"], 1)
         self.assertGreaterEqual(overview["unit_type_counts"]["listening"], 3)
 
-    def test_random_practice_ignores_units_without_questions(self) -> None:
-        from backend.app.database import connect
+    def test_listening_without_audio_is_hidden_and_cannot_start(self) -> None:
+        from backend.app.database import (
+            connect,
+            get_active_profile_id,
+            set_active_profile_id,
+        )
+        from backend.app.routers.dashboard import dashboard
         from backend.app.schemas import PracticeCreate
         from backend.app.services.practice import create_session
 
+        with connect() as connection:
+            original_profile_id = get_active_profile_id(connection)
+            profile_id = int(
+                connection.execute(
+                    "INSERT INTO question_bank_profiles(name) VALUES ('No audio')"
+                ).lastrowid
+            )
+            try:
+                set_active_profile_id(connection, profile_id)
+                paper_id, unit_id = self._paper_with_unit(connection, year=2096)
+                connection.execute(
+                    "UPDATE papers SET profile_id = ? WHERE id = ?",
+                    (profile_id, paper_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO questions
+                        (unit_id, number, stem, answer, score, sequence)
+                    VALUES (?, 1, 'question', 'A', 1, 1)
+                    """,
+                    (unit_id,),
+                )
+                overview = dashboard(connection)
+                with self.assertRaises(LookupError):
+                    create_session(
+                        connection,
+                        PracticeCreate(
+                            mode="random",
+                            paper_id=paper_id,
+                            unit_type="listening",
+                            selection_scope="paper_unit_type",
+                            count=1,
+                            shuffle_options=True,
+                        ),
+                    )
+            finally:
+                set_active_profile_id(connection, original_profile_id)
+
+        self.assertNotIn("listening", overview["paper_type_counts"])
+        self.assertNotIn("listening", overview["unit_type_counts"])
+
+    def test_dashboard_counts_follow_active_profile(self) -> None:
+        from backend.app.database import (
+            connect,
+            get_active_profile_id,
+            set_active_profile_id,
+        )
+        from backend.app.routers.dashboard import dashboard
+        from backend.app.services.listening import attach_listening_assets
+
+        audio = Path(self.temp.name) / "profile-listening.mp3"
+        audio.write_bytes(b"ID3-profile-listening")
+        with connect() as connection:
+            original_profile_id = get_active_profile_id(connection)
+            text_profile_id = int(
+                connection.execute(
+                    "INSERT INTO question_bank_profiles(name) VALUES ('Text profile')"
+                ).lastrowid
+            )
+            audio_profile_id = int(
+                connection.execute(
+                    "INSERT INTO question_bank_profiles(name) VALUES ('Audio profile')"
+                ).lastrowid
+            )
+            try:
+                text_paper_id, text_unit_id = self._paper_with_unit(
+                    connection,
+                    year=2097,
+                )
+                connection.execute(
+                    "UPDATE papers SET profile_id = ? WHERE id = ?",
+                    (text_profile_id, text_paper_id),
+                )
+                connection.execute(
+                    "UPDATE units SET unit_type = 'cloze' WHERE id = ?",
+                    (text_unit_id,),
+                )
+                for sequence, unit_type in enumerate(("reading", "part_b"), 2):
+                    unit_id = int(
+                        connection.execute(
+                            """
+                            INSERT INTO units
+                                (paper_id, unit_type, subtype, title, sequence,
+                                 passage, shared_data)
+                            VALUES (?, ?, '', ?, ?, 'passage', '{}')
+                            """,
+                            (text_paper_id, unit_type, unit_type, sequence),
+                        ).lastrowid
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO questions
+                            (unit_id, number, stem, answer, score, sequence)
+                        VALUES (?, ?, 'question', 'A', 1, 1)
+                        """,
+                        (unit_id, sequence),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO questions
+                        (unit_id, number, stem, answer, score, sequence)
+                    VALUES (?, 1, 'question', 'A', 1, 1)
+                    """,
+                    (text_unit_id,),
+                )
+
+                audio_paper_id, audio_unit_id = self._paper_with_unit(
+                    connection,
+                    year=2098,
+                )
+                connection.execute(
+                    "UPDATE papers SET profile_id = ? WHERE id = ?",
+                    (audio_profile_id, audio_paper_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO questions
+                        (unit_id, number, stem, answer, score, sequence)
+                    VALUES (?, 1, 'question', 'A', 1, 1)
+                    """,
+                    (audio_unit_id,),
+                )
+                attach_listening_assets(
+                    connection,
+                    audio_paper_id,
+                    [audio],
+                    [audio.name],
+                )
+
+                set_active_profile_id(connection, text_profile_id)
+                text_overview = dashboard(connection)
+                set_active_profile_id(connection, audio_profile_id)
+                audio_overview = dashboard(connection)
+            finally:
+                set_active_profile_id(connection, original_profile_id)
+
+        self.assertEqual(
+            set(text_overview["unit_type_counts"]),
+            {"cloze", "reading", "part_b"},
+        )
+        self.assertNotIn("listening", text_overview["unit_type_counts"])
+        self.assertEqual(set(audio_overview["unit_type_counts"]), {"listening"})
+        self.assertEqual(audio_overview["paper_type_counts"]["listening"], 1)
+
+    def test_random_practice_ignores_units_without_questions(self) -> None:
+        from backend.app.database import connect
+        from backend.app.schemas import PracticeCreate
+        from backend.app.services.listening import attach_listening_assets
+        from backend.app.services.practice import create_session
+
+        audio = Path(self.temp.name) / "single-section.mp3"
+        audio.write_bytes(b"ID3-single-section")
         with connect() as connection:
             paper_id, unit_id = self._paper_with_unit(connection, year=2095)
             connection.execute(
@@ -253,6 +414,7 @@ class ListeningAssetTests(unittest.TestCase):
                 """,
                 (unit_id,),
             )
+            attach_listening_assets(connection, paper_id, [audio], [audio.name])
             session = create_session(
                 connection,
                 PracticeCreate(
