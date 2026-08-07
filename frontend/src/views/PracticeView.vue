@@ -7,13 +7,11 @@ import {
   ChevronRight,
   Clock3,
   Coffee,
-  GripVertical,
   Play,
   Save,
   Send,
   X,
 } from 'lucide-vue-next'
-import { VueDraggableNext } from 'vue-draggable-next'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { get, post, put } from '../api'
@@ -73,7 +71,6 @@ const isWordBank = computed(() => activeUnit.value?.unit_type === 'word_bank')
 const isParagraphMatching = computed(() => activeUnit.value?.unit_type === 'paragraph_matching')
 const audioSeekable = computed(() => !timerEnabled.value || timerState.value?.mode === 'finished')
 const audioTracks = computed(() => activeUnit.value?.shared_data?.audio_tracks || [])
-const orderingItems = ref<any[]>([])
 const candidateOptions = computed(() => activeUnit.value?.questions?.[0]?.options || [])
 const selectedWordBank = ref<Record<string, string>>({})
 
@@ -133,14 +130,6 @@ const overallResult = computed(() => {
 const hasPendingUnits = computed(() =>
   Boolean(session.value?.units?.some((unit: any) => !unit.submission?.submitted)),
 )
-const orderingAnswers = computed(() => {
-  const result: Record<number, string> = {}
-  for (let index = 0; index < orderingItems.value.length; index++) {
-    const question = activeUnit.value?.questions?.[index]
-    if (question) result[question.id] = orderingItems.value[index].stable_key
-  }
-  return result
-})
 type PassageSegment = {
   type: 'text' | 'blank'
   text: string
@@ -422,7 +411,6 @@ async function load() {
   try {
     session.value = await get(`/practice/sessions/${route.params.id}`)
     loadPendingVocabulary(session.value.id)
-    syncOrdering()
     initializeTimer()
   }
   catch (e) { error.value = String(e) }
@@ -470,39 +458,15 @@ async function select(question: any, key: string) {
   finally { saving.value = null }
 }
 
-function syncOrdering() {
-  if (!isOrdering.value || !activeUnit.value?.questions?.length) {
-    orderingItems.value = []
-    return
-  }
-  const options = activeUnit.value.questions[0].options || []
-  const saved = activeUnit.value.questions.map((question: any) => question.user_answer).filter(Boolean)
-  const savedSet = new Set(saved)
-  orderingItems.value = [
-    ...saved.map((key: string) => options.find((option: any) => option.stable_key === key)).filter(Boolean),
-    ...options.filter((option: any) => !savedSet.has(option.stable_key)),
-  ]
+function isOrderingOptionUsedByAnother(question: any, stableKey: string) {
+  return (activeUnit.value?.questions || []).some((other: any) =>
+    other.id !== question.id && other.user_answer === stableKey,
+  )
 }
 
-async function saveOrdering() {
-  if (!isOrdering.value || session.value.status === 'submitted' || activeUnitSubmitted.value) return
-  const questions = activeUnit.value.questions
-  const activeItems = orderingItems.value.slice(0, questions.length)
-  try {
-    for (let index = 0; index < questions.length; index++) {
-      const item = activeItems[index]
-      if (!item) continue
-      questions[index].user_answer = item.stable_key
-      await put(`/practice/sessions/${session.value.id}/answers/${questions[index].id}`, {
-        answer: item.stable_key,
-        option_order: questions[index].option_order,
-      })
-    }
-  } catch (e) {
-    error.value = String(e)
-    session.value = await get(`/practice/sessions/${session.value.id}`)
-    syncOrdering()
-  }
+function selectOrdering(question: any, stableKey: string) {
+  if (!stableKey || isOrderingOptionUsedByAnother(question, stableKey)) return
+  void select(question, stableKey)
 }
 
 function selectWordBank(question: any, letter: string) {
@@ -547,7 +511,6 @@ function firstUnanswered(unitIndexes: number[]) {
 
 async function focusUnanswered(unitIndex: number, question: any) {
   activeUnitIndex.value = unitIndex
-  syncOrdering()
   highlightedQuestionId.value = question.id
   unansweredNotice.value = `${session.value.units[unitIndex].title}的第 ${question.number} 题还未作答，已为你定位。`
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
@@ -584,7 +547,6 @@ async function submitCurrentUnit() {
     session.value = await post(
       `/practice/sessions/${session.value.id}/units/${submittedUnitId}/submit`,
     )
-    syncOrdering()
     unansweredNotice.value = ''
     showUnitResult(submittedUnitId)
   } catch (e) {
@@ -616,7 +578,6 @@ function switchUnit(index: number) {
   activeUnitIndex.value = index
   unansweredNotice.value = ''
   highlightedQuestionId.value = null
-  syncOrdering()
 }
 
 function showUnitResult(unitId = activeUnit.value?.id) {
@@ -776,7 +737,16 @@ async function copySelectedTerm() {
         <template v-else>
         <h1>{{ activeUnit.unit_type === 'cloze' ? 'Use of English' : activeUnit.title }}</h1>
         <p v-if="activeUnit.shared_data?.directions" class="lead" style="margin-bottom:24px">{{ activeUnit.shared_data.directions }}</p>
-        <div class="passage" data-vocab-text @contextmenu="openVocabularyMenu">
+        <div v-if="isOrdering" class="ordering-reference-sheet" aria-label="候选段落 A 到 G">
+          <article v-for="option in candidateOptions" :key="option.stable_key" class="ordering-paragraph" data-vocab-text @contextmenu="openVocabularyMenu">
+            <strong class="ordering-paragraph-label">{{ option.label }}.</strong>
+            <div class="ordering-paragraph-content">
+              <ContentBlocks v-if="option.content_blocks?.length" :blocks="option.content_blocks" :package-id="activeContentPackage.packageId" :content-version="activeContentPackage.contentVersion" />
+              <p v-else>{{ option.content }}</p>
+            </div>
+          </article>
+        </div>
+        <div v-else class="passage" data-vocab-text @contextmenu="openVocabularyMenu">
           <ContentBlocks
             v-if="activeContentBlocks.length"
             :blocks="activeContentBlocks"
@@ -794,26 +764,24 @@ async function copySelectedTerm() {
       </section>
       <section class="question-pane">
         <div v-if="isOrdering" class="ordering-board">
-          <div class="ordering-note">拖动候选段落调整顺序。前 5 项依次作为第 41–45 题答案，系统会自动保存。</div>
-          <VueDraggableNext
-            v-model="orderingItems"
-            item-key="stable_key"
-            handle=".drag-handle"
-            ghost-class="drag-ghost"
-            :disabled="activeUnitSubmitted"
-            @change="saveOrdering"
-          >
-            <article v-for="(item, index) in orderingItems" :key="item.stable_key" class="candidate-card" data-vocab-text :data-question-id="activeUnit.questions[index]?.id" :class="{ extra: index >= activeUnit.questions.length, 'unanswered-focus': highlightedQuestionId === activeUnit.questions[index]?.id }" @contextmenu="openVocabularyMenu">
-              <span class="drag-handle"><GripVertical :size="19" /></span>
-              <span class="candidate-position">{{ index < activeUnit.questions.length ? 41 + index : '备选' }}</span>
-              <span class="option-letter">{{ item.label }}</span>
-              <ContentBlocks v-if="item.content_blocks?.length" :blocks="item.content_blocks" :package-id="activeContentPackage.packageId" :content-version="activeContentPackage.contentVersion" />
-              <p v-else>{{ item.content }}</p>
-              <span v-if="activeUnitSubmitted && index < activeUnit.questions.length" class="order-result" :class="{correct: orderingAnswers[activeUnit.questions[index].id] === activeUnit.questions[index].answer}">
-                {{ orderingAnswers[activeUnit.questions[index].id] === activeUnit.questions[index].answer ? '正确' : `答案 ${displayedAnswer(activeUnit.questions[index])}` }}
-              </span>
-            </article>
-          </VueDraggableNext>
+          <div class="ordering-section-heading"><span>选择答案</span><small>{{ activeUnit.questions.filter((question: any) => question.user_answer).length }} / {{ activeUnit.questions.length }} 已完成</small></div>
+          <div class="ordering-answer-list">
+            <div v-for="question in activeUnit.questions" :key="question.id" class="ordering-answer-row" :class="{'unanswered-focus': highlightedQuestionId === question.id}" :data-question-id="question.id">
+              <strong>{{ question.number }}.</strong>
+              <div class="ordering-choice-row" role="group" :aria-label="`${question.number}题段落选择`">
+                <button
+                  v-for="option in candidateOptions"
+                  :key="option.stable_key"
+                  type="button"
+                  class="ordering-choice"
+                  :class="resultClass(question, option)"
+                  :disabled="activeUnitSubmitted || isOrderingOptionUsedByAnother(question, option.stable_key)"
+                  @click="selectOrdering(question, option.stable_key)"
+                >{{ option.label }}</button>
+              </div>
+              <span v-if="activeUnitSubmitted" class="order-result" :class="{correct: question.is_correct}">{{ question.is_correct ? '正确' : `正确答案：${displayedAnswer(question)}` }}</span>
+            </div>
+          </div>
         </div>
         <div v-else-if="isMatchingPartB" class="matching-board">
           <div class="candidate-bank">
