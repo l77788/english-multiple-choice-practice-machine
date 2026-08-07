@@ -23,6 +23,7 @@ from .routers import (
     wrong,
 )
 from .services.ai_client import ensure_ai_model_catalog
+from .services.bundled_banks import install_bundled_question_banks
 from .services.vocabulary import clean_machine_meanings, translate_queued_vocabulary
 from .services.trash import purge_expired
 
@@ -30,6 +31,7 @@ from .services.trash import purge_expired
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_database()
+    install_bundled_question_banks()
     with connect() as connection:
         ensure_ai_model_catalog(connection)
         clean_machine_meanings(connection)
