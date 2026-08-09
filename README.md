@@ -1,5 +1,11 @@
 <div align="center">
 
+  **📱 安卓端已上线**：[英语刷题机 Android](https://github.com/wssfk12138/android-english-multiple-choice-practice-machine) 现已发布，支持**手机竖屏**与**平板横屏**，内置考研英语一/英语二题库，功能与 Windows 版保持一致。
+
+</div>
+
+<div align="center">
+
   <img src="frontend/public/assets/icons/brand-mark.png" alt="英语刷题机 Logo" width="96">
 
   # 英语刷题机
@@ -16,8 +22,8 @@
     <a href="LICENSE">GPL-3.0-only</a>
   </p>
 
-  <p>
-    <img src="https://img.shields.io/badge/platform-Windows-2563EB?style=flat-square" alt="Windows">
+<p>
+  <img src="https://img.shields.io/badge/platform-Windows-2563EB?style=flat-square" alt="Windows">
     <img src="https://img.shields.io/badge/privacy-local--first-16A34A?style=flat-square" alt="Local first">
     <img src="https://img.shields.io/badge/status-v0.1.0--alpha-F59E0B?style=flat-square" alt="v0.1.0-alpha">
     <img src="https://img.shields.io/badge/license-GPL--3.0--only-7C3AED?style=flat-square" alt="GPL-3.0-only">

@@ -1,5 +1,11 @@
 <div align="center">
 
+  **📱 Android is now available**: [English Practice Machine for Android](https://github.com/wssfk12138/android-english-multiple-choice-practice-machine) is released with **portrait phone** and **landscape tablet** layouts, bundled English I/English II banks, and feature parity with this Windows version.
+
+</div>
+
+<div align="center">
+
   <img src="frontend/public/assets/icons/brand-mark.png" alt="English Practice Machine logo" width="96">
 
   # English Practice Machine
