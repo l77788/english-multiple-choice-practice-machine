@@ -21,13 +21,14 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Setup Node.js + pnpm
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
           corepack: true
+
+      - name: Enable Corepack
+        run: corepack enable
 
       - name: Install Python dependencies
         run: |
