@@ -27,9 +27,7 @@ jobs:
           node-version: "22"
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Enable Corepack
-        run: corepack enable
+          corepack: true
 
       - name: Install Python dependencies
         run: |
