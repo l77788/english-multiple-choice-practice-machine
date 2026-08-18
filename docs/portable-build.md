@@ -102,5 +102,15 @@ CI 与本地构建的关键区别：CI 里用 `setup-python` 创建 `.venv`，�
 ```powershell
 git tag v1.1.0
 git push origin v1.1.0
-# Release 页会自动出现 英语刷题机-便携版.zip 与 英语刷题机.exe
+# Release 页会自动出现 english-practice-machine-portable.zip 与 english-practice-machine.exe
 ```
+
+#### Release 资产命名说明
+
+工作流会在「Prepare ASCII-named release files」这一步，把中文名的 `英语刷题机-便携版.zip` 和 `英语刷题机.exe` 各复制一份 ASCII 命名的副本（`english-practice-machine-portable.zip` / `english-practice-machine.exe`）再挂到 Release。原因是 `softprops/action-gh-release` 在 Windows runner 上上传资产时会**损坏中文文件名**（实测会把 `英语刷题机-便携版.zip` 变成 `-.zip`）。zip 解压后的顶层目录 `英语刷题机-便携版\` 仍然是中文，不影响用户使用。
+
+#### CI 构建的三个已知坑（已修复）
+
+1. **ASCII stdout 编码**：CI 的 `pwsh` stdout 默认按 ASCII 处理，`tools/gen_launcher.py`、`tools/zip_portable.py` 在打印中文文件名时会抛 `UnicodeEncodeError` 导致构建失败。两个脚本都已在 `main()` 入口加 `sys.stdout/stderr.reconfigure(encoding="utf-8", errors="replace")` 兜底。
+2. **upload-artifact 中文通配符**：`actions/upload-artifact@v4` 的 glob（如 `.build/*.zip`）匹配不到中文文件名，导致「zip 明明生成了却上传失败」。上传时必须用精确中文路径 `.build/英语刷题机-便携版.zip`、`dist/英语刷题机.exe`，不要写通配符。
+3. **Release 上传中文名损坏**：见上文「Release 资产命名说明」，用 ASCII 副本发布规避。
