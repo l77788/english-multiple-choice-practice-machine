@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { inject } from 'vue'
 import { AlertTriangle } from 'lucide-vue-next'
+import { CONFIRM_KEY } from '../composables/useConfirm'
 import type { ConfirmState } from '../composables/useConfirm'
 
-const state = inject<ConfirmState>('confirm')!
+const state = inject(CONFIRM_KEY)!
 
 function close(result: boolean) {
   state.visible.value = false

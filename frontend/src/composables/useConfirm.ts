@@ -1,4 +1,4 @@
-import { inject, provide, ref, type Ref } from 'vue'
+import { inject, provide, ref, type InjectionKey, type Ref } from 'vue'
 
 export interface ConfirmOptions {
   title: string
@@ -14,7 +14,7 @@ export interface ConfirmState {
   resolve: Ref<((value: boolean) => void) | null>
 }
 
-const KEY = Symbol('confirm')
+export const CONFIRM_KEY: InjectionKey<ConfirmState> = Symbol('confirm')
 
 export function provideConfirm(): ConfirmState {
   const state: ConfirmState = {
@@ -22,12 +22,12 @@ export function provideConfirm(): ConfirmState {
     options: ref(null),
     resolve: ref(null),
   }
-  provide(KEY, state)
+  provide(CONFIRM_KEY, state)
   return state
 }
 
 export function useConfirm() {
-  const state = inject<ConfirmState>(KEY)
+  const state = inject(CONFIRM_KEY)
   if (!state) {
     throw new Error('useConfirm must be used inside a component under provideConfirm')
   }
