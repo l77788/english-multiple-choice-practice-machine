@@ -83,4 +83,4 @@ jobs:
           files: |
             dist/english-practice-machine.exe
             .build/english-practice-machine-portable.zip
-          generate_release_notes: true
+          body_path: .github/release-notes.md
