@@ -87,11 +87,20 @@
 | `desktop_app.py` | 桌面窗口入口（启动本地服务 + 打开窗口） |
 | `启动英语刷题机.vbs` | 桌面应用的「双击即用」启动器 |
 
-## 六、在 CI 中构建（可选）
+## 六、CI 自动构建（打 tag 即出发行物）
 
-`build-green-portable.ps1` 同样可在 GitHub Actions（Windows runner）中使用。流水线大致为：
+仓库已接入 GitHub Actions 工作流 `.github/workflows/build.yml`。**只要推一个 `v*` 标签**（或在 Actions 页面手动触发 `workflow_dispatch`），CI 就会在 Windows runner 上自动完成全套构建并产出发行物：
 
-1. `setup`：安装 Python + Node/pnpm，创建 `.venv` 并安装依赖；
-2. `build-frontend`：`corepack pnpm run build`；
-3. `build-portable`：执行 `.\build-green-portable.ps1`；
-4. `upload`：上传 `.build\*.zip` 作为 Release 产物。
+1. 安装 Python 3.13，创建 `.venv` 并安装依赖（含 PyInstaller）；
+2. 安装 Node + pnpm，构建前端 `frontend/dist`；
+3. 用 PyInstaller 打出单文件 exe（`dist\英语刷题机.exe`）；
+4. 执行 `.\build-green-portable.ps1` 打出绿色便携 zip（`.build\英语刷题机-便携版.zip`）；
+5. 两者都上传为 Actions artifact，并在打 tag 时通过 `softprops/action-gh-release` 挂到对应的 GitHub Release 上。
+
+CI 与本地构建的关键区别：CI 里用 `setup-python` 创建 `.venv`，脚本自动据此探测匹配的 Embedded Python 版本下载，无需手动指定。
+
+```powershell
+git tag v1.1.0
+git push origin v1.1.0
+# Release 页会自动出现 英语刷题机-便携版.zip 与 英语刷题机.exe
+```
