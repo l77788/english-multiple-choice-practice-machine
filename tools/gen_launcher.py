@@ -20,6 +20,9 @@ shell.Run chr(34) & pythonw & chr(34) & " " & chr(34) & launcher & chr(34), 0, F
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     build = os.environ.get("EPM_BUILD")
     if not build or not os.path.isdir(build):
         print("EPM_BUILD not set or not a directory", file=sys.stderr)

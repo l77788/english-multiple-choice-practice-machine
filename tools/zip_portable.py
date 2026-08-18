@@ -14,6 +14,9 @@ PREFIX = "\u82f1\u8bed\u5237\u9898\u673a-\u4fbf\u643a\u7248/"  # 英语刷题机
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     build = os.environ.get("EPM_BUILD")
     if not build or not os.path.isdir(build):
         print("EPM_BUILD not set or not a directory", file=sys.stderr)
