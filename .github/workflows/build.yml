@@ -67,7 +67,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: english-practice-machine-portable-zip
-          path: .build/*.zip
+          path: .build/英语刷题机-便携版.zip
           if-no-files-found: error
 
       - name: Create Release
@@ -76,5 +76,5 @@ jobs:
         with:
           files: |
             dist/英语刷题机.exe
-            .build/*.zip
+            .build/英语刷题机-便携版.zip
           generate_release_notes: true
