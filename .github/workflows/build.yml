@@ -70,11 +70,17 @@ jobs:
           path: .build/英语刷题机-便携版.zip
           if-no-files-found: error
 
+      - name: Prepare ASCII-named release files
+        shell: pwsh
+        run: |
+          Copy-Item dist/英语刷题机.exe dist/english-practice-machine.exe -Force
+          Copy-Item .build/英语刷题机-便携版.zip .build/english-practice-machine-portable.zip -Force
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/英语刷题机.exe
-            .build/英语刷题机-便携版.zip
+            dist/english-practice-machine.exe
+            .build/english-practice-machine-portable.zip
           generate_release_notes: true
