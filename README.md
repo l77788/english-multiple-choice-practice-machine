@@ -308,7 +308,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm run build
 cd ..
 
-.\.venv\Scripts\python.exe desktop_app.py
+.\.venv\Scripts\pythonw.exe desktop_app.py
 ```
 
 程序会以桌面窗口形式启动（基于 WebView2），无需打开浏览器。也可以手动访问 `http://127.0.0.1:8765`。
@@ -318,6 +318,28 @@ cd ..
 ```powershell
 .\setup.ps1
 .\start.ps1
+```
+
+#### 日常使用：双击启动器（推荐）
+
+完成一次 `setup.ps1` 安装后，日常使用无需再打开命令行：
+
+1. 双击项目根目录下的 **`启动英语刷题机.vbs`**，程序会以桌面窗口形式打开，不弹黑色控制台窗口。
+2. 首次启动需要十几秒（加载后端与题库），之后每次启动会更快。
+3. 重复双击不会报错：程序检测到已在运行时，只会再打开一个窗口，不会重复占用端口。
+4. 如果启动失败，可查看项目根目录下的 `app.log` 定位原因。
+
+也可以把 `启动英语刷题机.vbs` 发送到桌面或固定到任务栏，像普通软件一样使用。
+
+#### 便携版（推荐给普通用户）
+
+如果你不想接触源码或命令行，可以获取由本仓库构建脚本产出的 **`英语刷题机-便携版.zip`**：把官方嵌入式 Python、依赖、前端与内置题库打成一个文件夹，用户**解压 → 双击 `启动英语刷题机.vbs` → 即用**，无需安装 Python / Node，无需管理员权限。相比单文件 exe，启动更快、更不易误报。
+
+构建方法与产物结构见 <a href="docs/portable-build.md">便携版构建说明</a>（`docs/portable-build.md`）。
+
+```powershell
+.\build-green-portable.ps1
+# 产物：.build\英语刷题机-便携版.zip
 ```
 
 开发模式需要两个终端：

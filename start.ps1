@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = $PSScriptRoot
-$python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$python = Join-Path $projectRoot ".venv\Scripts\pythonw.exe"
 $launcher = Join-Path $projectRoot "desktop_app.py"
 
 if (-not (Test-Path -LiteralPath $python)) {

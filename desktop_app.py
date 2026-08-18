@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 
 import uvicorn
@@ -19,6 +20,7 @@ if sys.stderr is None:
 
 
 URL = "http://127.0.0.1:8765"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log")
 
 
 def run_server() -> None:
@@ -34,21 +36,35 @@ def wait_for_server() -> None:
             time.sleep(0.25)
 
 
+def server_already_running() -> bool:
+    try:
+        with urllib.request.urlopen(f"{URL}/api/health", timeout=1) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def main() -> None:
-    import webview
+    try:
+        import webview
 
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    wait_for_server()
+        if not server_already_running():
+            server_thread = threading.Thread(target=run_server, daemon=True)
+            server_thread.start()
+            wait_for_server()
 
-    webview.create_window(
-        "英语刷题机",
-        URL,
-        width=1280,
-        height=860,
-        min_size=(960, 640),
-    )
-    webview.start()
+        webview.create_window(
+            "英语刷题机",
+            URL,
+            width=1280,
+            height=860,
+            min_size=(960, 640),
+        )
+        webview.start()
+    except Exception:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {traceback.format_exc()}")
+        raise
 
 
 if __name__ == "__main__":

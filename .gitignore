@@ -17,6 +17,10 @@ frontend/vite.config.d.ts
 build/
 dist/
 
+# Portable build artifacts
+.build/
+.cache/
+
 # Local runtime data and private development artifacts
 backend/data/
 work/
