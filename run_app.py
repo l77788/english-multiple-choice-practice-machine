@@ -26,7 +26,9 @@ def open_when_ready() -> None:
     for _ in range(80):
         try:
             urllib.request.urlopen(f"{URL}/api/health", timeout=1)
-            webbrowser.open(URL)
+            # A unique query string forces the browser to navigate to a fresh
+            # page instead of focusing a stale tab from a previous run.
+            webbrowser.open(f"{URL}?v={int(time.time())}")
             return
         except Exception:
             time.sleep(0.25)
