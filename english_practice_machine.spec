@@ -10,14 +10,14 @@ from pathlib import Path
 project_root = Path(SPECPATH).resolve()
 
 a = Analysis(
-    ["run_app.py"],
+    ["desktop_app.py"],
     pathex=[str(project_root)],
     binaries=[],
     datas=[
         (str(project_root / "frontend" / "dist"), "frontend/dist"),
         (str(project_root / "examples" / "bundled-banks"), "examples/bundled-banks"),
     ],
-    hiddenimports=[],
+    hiddenimports=["webview", "webview.platforms.edgechromium"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

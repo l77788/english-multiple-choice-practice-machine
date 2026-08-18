@@ -308,10 +308,10 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm run build
 cd ..
 
-.\.venv\Scripts\python.exe run_app.py
+.\.venv\Scripts\python.exe desktop_app.py
 ```
 
-程序会监听 `http://127.0.0.1:8765`，并尝试自动打开浏览器。也可以手动访问该地址。
+程序会以桌面窗口形式启动（基于 WebView2），无需打开浏览器。也可以手动访问 `http://127.0.0.1:8765`。
 
 也可以使用项目提供的 PowerShell 脚本完成同样的流程：
 
