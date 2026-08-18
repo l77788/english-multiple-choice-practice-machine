@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 import urllib.request
@@ -8,6 +10,13 @@ import webbrowser
 import uvicorn
 
 from backend.app.main import app
+
+# PyInstaller windowed builds (console=False) leave these as None; uvicorn's
+# log formatters call .isatty() on them and crash, so point them at os.devnull.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 
 URL = "http://127.0.0.1:8765"
